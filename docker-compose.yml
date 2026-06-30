@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    container_name: x-monitor-worker
+    container_name: x-ray-worker
     restart: unless-stopped
     volumes:
       - ./data:/data
@@ -19,7 +19,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
-    container_name: x-monitor-web
+    container_name: x-ray-web
     restart: unless-stopped
     ports:
       - "8501:5000"

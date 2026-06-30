@@ -1,4 +1,4 @@
-# X投稿監視システム
+# X-RAY
 
 NotionのXアカウントDBを元に、監視対象44アカウントの投稿を30分おきに取得し、
 カテゴリ別に切り替えて見られるWebビューア。
@@ -42,7 +42,7 @@ docker compose up -d
 **方法1: パスワードログイン（不安定な場合あり）**
 
 ```bash
-docker exec -it x-monitor-worker python scraper.py add-accounts
+docker exec -it x-ray-worker python scraper.py add-accounts
 ```
 
 X側のCloudflare/bot対策強化により、`400 Could not log you in now`等で失敗することがある。
@@ -67,7 +67,7 @@ bot判定を受けにくく、現状もっとも安定する。
 
 3. 登録実行:
    ```bash
-   docker exec -it x-monitor-worker python scraper.py add-cookies
+   docker exec -it x-ray-worker python scraper.py add-cookies
    ```
 
 `ct0`クッキーが含まれていれば即座にアクティブ状態になり、ログイン処理自体が走らないため
@@ -76,7 +76,7 @@ bot判定によるブロックを回避しやすい。
 ### 4. 初回スクレイプを手動実行（任意、起動時に自動実行もされる）
 
 ```bash
-docker exec -it x-monitor-worker python scraper.py
+docker exec -it x-ray-worker python scraper.py
 ```
 
 ### 5. ブラウザでアクセス
@@ -90,11 +90,53 @@ http://<サーバーのIP>:8501
 
 ## 運用Tips
 
-- **ログ確認**: `docker exec -it x-monitor-worker tail -f /var/log/scraper.log`
+- **ログ確認**: `docker exec -it x-ray-worker tail -f /var/log/scraper.log`
 - **状態確認画面**: `http://<host>:8501/status` でアカウントごとの最終取得時刻・エラー履歴が見れる
-- **再ログインが必要になったら**: `docker exec -it x-monitor-worker python scraper.py relogin`
-- **監視対象を増やしたい**: `app/seed_accounts.py` の `ACCOUNTS` に追記 → `docker compose restart worker`
+- **再ログインが必要になったら**: `docker exec -it x-ray-worker python scraper.py relogin`
+- **監視対象を増やしたい・編集したい**: `app/seed_accounts.py` を編集 → `docker compose restart worker`
   （既存のworker起動時に自動でUPSERTされる）
+
+  `ACCOUNTS` リストに `(screen_name, display_name, [カテゴリ一覧])` のタプルを追加する：
+
+  ```python
+  ACCOUNTS = [
+      ("nemoto_nagi", "根本凪", ["ギャル"]),
+      # ↓ 新規追加はこのように1行足す
+      ("new_account_id", "表示名", ["カテゴリ名"]),
+      ...
+  ]
+  ```
+
+  - `screen_name`: Xのユーザー名（`@`は付けない、例: `nemoto_nagi`）
+  - `display_name`: 画面に表示される名前（日本語OK）
+  - `categories`: タブ分類用のカテゴリ。1つでも複数（`["ギャル", "artist"]`等）でもOK
+
+  **新しいカテゴリを使う場合**は、同ファイル下部の `ALL_CATEGORIES` リストにもカテゴリ名を追記しないと、
+  タブ一覧に表示されない（投稿自体は取得・保存されるが、絞り込みタブが出ない状態になる）：
+
+  ```python
+  ALL_CATEGORIES = [
+      "ギャル", "videogame", "clubmusic", "artist", "lighter",
+      "writer", "developer", "illustrator", "news", "photographer",
+      "gadget", "R18",
+      "新しいカテゴリ名",  # ← 追加
+  ]
+  ```
+
+  既存アカウントの `screen_name` を変更（Xアカウント名変更時など）した場合、`screen_name` が
+  主キーになっているため、古い名前の行は自動では消えない。手動で消したい場合：
+
+  ```bash
+  docker exec -it x-ray-worker python -c "
+  from db import get_conn
+  conn = get_conn()
+  conn.execute(\"DELETE FROM accounts WHERE screen_name='古いscreen_name'\")
+  conn.execute(\"DELETE FROM tweets WHERE screen_name='古いscreen_name'\")
+  conn.commit()
+  print('削除完了')
+  "
+  ```
+
 - **取得間隔を変えたい**: `Dockerfile.worker` の cron 設定（`*/30 * * * *`）を編集してrebuild
 
 ## 注意点

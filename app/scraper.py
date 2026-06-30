@@ -3,7 +3,7 @@
 twscrape で各監視対象アカウントの最新ツイートを取得し、SQLiteに保存する。
 
 事前準備:
-    docker exec -it x-monitor-worker python scraper.py add-accounts
+    docker exec -it x-ray-worker python scraper.py add-accounts
     （アカウント追加は accounts.txt を読み込んで一括登録）
 """
 
@@ -174,7 +174,7 @@ async def scrape_all():
     accounts = await api.pool.accounts_info()
     if not accounts:
         print("[!] twscrapeにXアカウントが登録されていません。")
-        print("    先に: docker exec -it x-monitor-worker python scraper.py add-accounts")
+        print("    先に: docker exec -it x-ray-worker python scraper.py add-accounts")
         return
 
     screen_names = get_all_screen_names()
