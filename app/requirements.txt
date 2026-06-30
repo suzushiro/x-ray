@@ -1,0 +1,2 @@
+flask==3.0.3
+twscrape[curl]==0.19.1

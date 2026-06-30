@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>状態確認 - X監視ビューア</title>
+<style>
+    body {
+        font-family: -apple-system, "Hiragino Sans", sans-serif;
+        background: #0f1419;
+        color: #e7e9ea;
+        margin: 0;
+        padding: 16px;
+    }
+    a { color: #1d9bf0; }
+    h2 { font-size: 16px; border-bottom: 1px solid #2a3038; padding-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 30px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a3038; }
+    th { color: #8b98a5; font-weight: normal; }
+    .ok { color: #00ba7c; }
+    .error { color: #f4212e; }
+</style>
+</head>
+<body>
+
+<p><a href="/">← 一覧に戻る</a></p>
+
+<h2>アカウント別 最終取得</h2>
+<table>
+    <tr><th>screen_name</th><th>表示名</th><th>最終取得</th></tr>
+    {% for a in accounts %}
+    <tr>
+        <td>@{{ a.screen_name }}</td>
+        <td>{{ a.display_name }}</td>
+        <td>{{ a.last_scraped_at or '未取得' }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+<h2>直近の実行ログ</h2>
+<table>
+    <tr><th>実行時刻</th><th>対象</th><th>結果</th><th>新規件数</th><th>メッセージ</th></tr>
+    {% for l in logs %}
+    <tr>
+        <td>{{ l.run_at[:19].replace('T', ' ') }}</td>
+        <td>@{{ l.screen_name }}</td>
+        <td class="{{ l.status }}">{{ l.status }}</td>
+        <td>{{ l.new_tweets }}</td>
+        <td>{{ l.message }}</td>
+    </tr>
+    {% endfor %}
+</table>
+
+</body>
+</html>

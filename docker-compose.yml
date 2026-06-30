@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: x-monitor-worker
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      - DB_PATH=/data/data.db
+      - TWITTER_ACCOUNTS_FILE=/data/accounts.txt
+      - TWEETS_PER_USER=10
+      - TWS_HTTP_BACKEND=curl
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: x-monitor-web
+    restart: unless-stopped
+    ports:
+      - "8501:5000"
+    volumes:
+      - ./data:/data
+    environment:
+      - DB_PATH=/data/data.db
+    depends_on:
+      - worker
