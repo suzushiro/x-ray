@@ -116,7 +116,7 @@ http://<サーバーのIP>:8501
 
   ```python
   ALL_CATEGORIES = [
-      "ギャル", "videogame", "clubmusic", "artist", "lighter",
+      "ギャル", "videogame", "clubmusic", "artist",
       "writer", "developer", "illustrator", "news", "photographer",
       "gadget", "R18",
       "新しいカテゴリ名",  # ← 追加
