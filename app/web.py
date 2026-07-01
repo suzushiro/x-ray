@@ -1,4 +1,5 @@
 import json
+import base64
 from flask import Flask, render_template, request
 
 from db import get_conn
@@ -15,7 +16,7 @@ def index():
 
     if category == "all":
         rows = conn.execute("""
-            SELECT t.*, a.display_name, a.categories
+            SELECT t.*, a.display_name, a.categories, a.profile_image_url
             FROM tweets t
             JOIN accounts a ON t.screen_name = a.screen_name
             ORDER BY t.created_at DESC
@@ -23,7 +24,7 @@ def index():
         """).fetchall()
     else:
         rows = conn.execute("""
-            SELECT t.*, a.display_name, a.categories
+            SELECT t.*, a.display_name, a.categories, a.profile_image_url
             FROM tweets t
             JOIN accounts a ON t.screen_name = a.screen_name
             WHERE a.categories LIKE ?
@@ -53,7 +54,12 @@ def index():
     for r in rows:
         d = dict(r)
         d["media"] = json.loads(d["media_json"] or "[]")
+        d["videos"] = json.loads(d["video_json"] or "[]")
         d["categories_list"] = json.loads(d["categories"] or "[]")
+        # media URLリストをbase64エンコード（HTML属性に安全に埋め込むため）
+        d["media_b64"] = base64.b64encode(
+            json.dumps(d["media"]).encode()
+        ).decode() if d["media"] else ""
         tweets.append(d)
 
     return render_template(

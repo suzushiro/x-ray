@@ -116,17 +116,23 @@ def save_tweets(screen_name: str, tweets: list):
     new_count = 0
 
     for t in tweets:
-        media_urls = []
+        photo_urls = []
+        video_items = []
+
         if t.media and t.media.photos:
-            media_urls += [p.url for p in t.media.photos]
+            photo_urls = [p.url for p in t.media.photos]
         if t.media and t.media.videos:
-            media_urls += [v.thumbnailUrl for v in t.media.videos]
+            for v in t.media.videos:
+                video_items.append({
+                    "thumb": v.thumbnailUrl,
+                    "url": t.url,
+                })
 
         cur.execute("""
         INSERT INTO tweets
         (tweet_id, screen_name, content, created_at, url,
-         like_count, retweet_count, reply_count, media_json, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         like_count, retweet_count, reply_count, media_json, video_json, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tweet_id) DO UPDATE SET
             like_count=excluded.like_count,
             retweet_count=excluded.retweet_count,
@@ -140,7 +146,8 @@ def save_tweets(screen_name: str, tweets: list):
             t.likeCount or 0,
             t.retweetCount or 0,
             t.replyCount or 0,
-            json.dumps(media_urls, ensure_ascii=False),
+            json.dumps(photo_urls, ensure_ascii=False),
+            json.dumps(video_items, ensure_ascii=False),
             datetime.now(timezone.utc).isoformat(),
         ))
         if cur.rowcount and cur.lastrowid:
@@ -193,8 +200,8 @@ async def scrape_all():
 
             conn = get_conn()
             conn.execute(
-                "UPDATE accounts SET user_id=?, last_scraped_at=? WHERE screen_name=?",
-                (str(user.id), datetime.now(timezone.utc).isoformat(), screen_name)
+                "UPDATE accounts SET user_id=?, profile_image_url=?, last_scraped_at=? WHERE screen_name=?",
+                (str(user.id), user.profileImageUrl, datetime.now(timezone.utc).isoformat(), screen_name)
             )
             conn.commit()
             conn.close()

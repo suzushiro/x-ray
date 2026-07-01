@@ -22,9 +22,16 @@ def init_db():
         display_name TEXT NOT NULL,
         categories TEXT NOT NULL,   -- JSON array
         user_id TEXT,               -- X internal numeric id (resolved by twscrape)
+        profile_image_url TEXT,     -- アイコン画像URL
         last_scraped_at TEXT
     )
     """)
+
+    # 既存DBへのマイグレーション
+    try:
+        cur.execute("ALTER TABLE accounts ADD COLUMN profile_image_url TEXT")
+    except Exception:
+        pass
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS tweets (
@@ -36,11 +43,18 @@ def init_db():
         like_count INTEGER DEFAULT 0,
         retweet_count INTEGER DEFAULT 0,
         reply_count INTEGER DEFAULT 0,
-        media_json TEXT,            -- JSON array of media urls
+        media_json TEXT,            -- JSON array of photo urls
+        video_json TEXT,            -- JSON array of {thumb, url} for videos
         fetched_at TEXT,
         FOREIGN KEY (screen_name) REFERENCES accounts(screen_name)
     )
     """)
+
+    # 既存DBへのマイグレーション（video_jsonカラムがなければ追加）
+    try:
+        cur.execute("ALTER TABLE tweets ADD COLUMN video_json TEXT")
+    except Exception:
+        pass  # すでに存在する場合は無視
 
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_tweets_created

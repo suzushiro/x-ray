@@ -15,78 +15,64 @@ web (Flask)
 
 ## セットアップ手順
 
-### 1. Xアカウント情報を準備
-
-`data/accounts.txt` を編集して、7つの捨て垢の情報を1行ずつ追加：
-
-```
-username1	password1	email1@example.com	emailpass1
-username2	password2	email2@example.com	emailpass2
-...
-```
-
-タブ区切りなので注意（スペースだとエラーになる）。
-
-### 2. 起動
+### 1. ファイルを配置
 
 ```bash
-cd x-ray
+cd ~
+unzip x-ray.zip
+cd x-ray   # ← 以降のコマンドは必ずここで実行（重要）
+```
+
+### 2. ビルド・起動
+
+```bash
 docker compose build
 docker compose up -d
 ```
 
-初回起動時に自動でDB初期化・44アカウントのシードが入る。
+初回起動時に自動でDB初期化・監視対象アカウントのシードが入る。
 
-### 3. twscrapeにXアカウントを登録
+### 3. クッキーを取得して `data/cookies.txt` に記入
 
-**方法1: パスワードログイン（不安定な場合あり）**
+X側のbot対策により、パスワードログインは現状ほぼブロックされるため、
+**クッキー認証が実質必須**。7垢分、1アカウントずつ繰り返す。
 
-```bash
-docker exec -it x-ray-worker python scraper.py add-accounts
+1. Firefoxの**プライベートウィンドウ**（Ctrl+Shift+P）で `https://x.com` を開く
+2. 捨て垢でログイン
+3. **F12** → **ストレージ** タブ → **Cookie** → `https://x.com`
+4. `auth_token` と `ct0` の値（Value列）をコピー
+5. `data/cookies.txt` に以下の形式で追記（区切りは**タブ**、スペース不可）：
+
+```
+xconnecter01	auth_token=コピーした値; ct0=コピーした値
+xconnecter02	auth_token=コピーした値; ct0=コピーした値
 ```
 
-X側のCloudflare/bot対策強化により、`400 Could not log you in now`等で失敗することがある。
-その場合は方法2（クッキー認証）を使う。
+Chromeの場合は F12 → **Application** タブ → **Cookies** → `https://x.com` で同じ値を取得できる。
 
-**方法2: クッキー認証（推奨・安定）**
+### 4. クッキーを登録
 
-パスワードログインを行わず、ブラウザで人間として一度ログインしたクッキーをそのまま使う方式。
-bot判定を受けにくく、現状もっとも安定する。
+```bash
+docker exec -it x-ray-worker python scraper.py add-cookies
+```
 
-1. `data/cookies.txt` を作成（タブ区切り、1行1アカウント）:
-   ```
-   username1	auth_token=xxxxxxxx; ct0=yyyyyyyy
-   username2	auth_token=xxxxxxxx; ct0=yyyyyyyy
-   ```
+`[+] 7/7 件のアカウントをクッキー認証で登録しました` と出ればOK。
 
-2. 各アカウントのクッキー取得方法:
-   - ブラウザのシークレットウィンドウで `https://x.com` を開き、対象アカウントでログイン
-   - F12 (開発者ツール) → Application タブ → Cookies → `https://x.com`
-   - `auth_token` と `ct0` の値(Value列)をコピー
-   - `auth_token=コピーした値; ct0=コピーした値` の形式で1行作る
-
-3. 登録実行:
-   ```bash
-   docker exec -it x-ray-worker python scraper.py add-cookies
-   ```
-
-`ct0`クッキーが含まれていれば即座にアクティブ状態になり、ログイン処理自体が走らないため
-bot判定によるブロックを回避しやすい。
-
-### 4. 初回スクレイプを手動実行（任意、起動時に自動実行もされる）
+### 5. 初回スクレイプを手動実行
 
 ```bash
 docker exec -it x-ray-worker python scraper.py
 ```
 
-### 5. ブラウザでアクセス
+`[*] 全件取得完了` まで待つ（数分かかる）。以後は30分おきにcronで自動実行される。
+
+### 6. ブラウザで確認
 
 ```
 http://<サーバーのIP>:8501
 ```
 
-カテゴリタブ（ギャル / videogame / clubmusic / artist / developer / illustrator 等）
-をタップして投稿を絞り込める。
+投稿一覧が表示されて、カテゴリタブが切り替えられればセットアップ完了。
 
 ## 運用Tips
 
