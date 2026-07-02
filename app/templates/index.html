@@ -1,9 +1,16 @@
 <!DOCTYPE html>
-<html lang="ja" data-theme="light">
+<html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>X-RAY</title>
+<script>
+// ページ描画前にテーマを即適用（チカチカ防止）
+(function() {
+    const t = localStorage.getItem('xray-theme') || 'light';
+    document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
 <style>
 :root {
     --bg: #ffffff;
@@ -26,6 +33,8 @@
     --video-overlay: rgba(0,0,0,0.45);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* 初回ロード時はtransitionを無効にしてチカチカ防止 */
+.no-transition * { transition: none !important; }
 body { font-family: -apple-system, "Hiragino Sans", "Yu Gothic", sans-serif; background: var(--bg); color: var(--text); transition: background 0.2s, color 0.2s; }
 
 header {
@@ -33,7 +42,7 @@ header {
     background: var(--bg);
     border-bottom: 1px solid var(--border);
     padding: 12px 16px;
-    z-index: 10;
+    z-index: 20;
     display: flex; align-items: center; gap: 12px;
 }
 .header-left { flex: 1; }
@@ -60,6 +69,10 @@ header h1 { font-size: 18px; margin: 0 0 2px 0; }
     border-bottom: 1px solid var(--border);
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
+    position: sticky;
+    top: 0; /* JSで動的に上書きする */
+    background: var(--bg);
+    z-index: 10;
 }
 .tabs::-webkit-scrollbar { display: none; }
 .tab {
@@ -301,10 +314,16 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 </div>
 
 <script>
-// テーマ
-const savedTheme = localStorage.getItem('xray-theme') || 'light';
-document.documentElement.setAttribute('data-theme', savedTheme);
-updateThemeBtn(savedTheme);
+// テーマ（headで既に適用済み、ここではボタン表示の更新のみ）
+updateThemeBtn(document.documentElement.getAttribute('data-theme'));
+
+// 初回ロード時のtransitionを一瞬無効にしてチカチカ完全防止
+document.documentElement.classList.add('no-transition');
+requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+        document.documentElement.classList.remove('no-transition');
+    });
+});
 
 function toggleTheme() {
     const cur = document.documentElement.getAttribute('data-theme');
@@ -397,6 +416,17 @@ async function dlAllBtn(btnEl) {
     const dt = btnEl.dataset.dt;
     await dlAll(btnEl, imgs, handle, dt);
 }
+
+// タブのtopをheaderの実際の高さに動的に合わせる
+function adjustTabsTop() {
+    const header = document.querySelector('header');
+    const tabs = document.querySelector('.tabs');
+    if (header && tabs) {
+        tabs.style.top = header.offsetHeight + 'px';
+    }
+}
+adjustTabsTop();
+window.addEventListener('resize', adjustTabsTop);
 </script>
 </body>
 </html>
