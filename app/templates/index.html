@@ -49,6 +49,16 @@ header {
 header h1 { font-size: 18px; margin: 0 0 2px 0; }
 .alpha { font-size: 12px; font-weight: 400; color: var(--text-dim); margin-left: 3px; vertical-align: middle; }
 
+.health {
+    font-size: 11px; margin-top: 4px;
+    padding: 3px 8px; border-radius: 6px;
+    display: inline-flex; align-items: center; gap: 5px;
+}
+.health-ok { background: rgba(0,186,124,0.12); color: #00ba7c; }
+.health-warn { background: rgba(244,33,46,0.10); color: #f4212e; }
+.health-account { font-weight: 600; }
+.health-link { color: inherit; text-decoration: underline; }
+
 .github-btn {
     flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
@@ -217,8 +227,22 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
         <h1>X-Ray<span class="alpha">(α)</span></h1>
         <div class="meta">
             全{{ total_count }}件
-            {% if last_run %} ・ 最終更新: {{ last_run[:16].replace('T', ' ') }} UTC{% endif %}
+            {% if last_run_jst %} ・ 最終更新: {{ last_run_jst }}{% endif %}
         </div>
+        {% if health %}
+        {% set has_error = error_accounts|length > 0 %}
+        <div class="health {% if has_error %}health-warn{% else %}health-ok{% endif %}">
+            {% if has_error %}
+            ⚠️ エラー検知:
+            {% for a in error_accounts %}
+            <span class="health-account">@{{ a.screen_name }}({{ a.err_count }}回)</span>
+            {% endfor %}
+            ・ <a href="/status" class="health-link">詳細 →</a>
+            {% else %}
+            ✓ 正常稼働中 ・ 直近1h: {{ health.ok_count }}件成功
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
     <a href="https://github.com/suzushiro/x-ray" target="_blank" class="github-btn" aria-label="GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">

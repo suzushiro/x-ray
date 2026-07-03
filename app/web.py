@@ -52,6 +52,37 @@ def index():
         SELECT run_at FROM scrape_log ORDER BY run_at DESC LIMIT 1
     """).fetchone()
 
+    # 最終更新時刻をJSTに変換
+    last_run_jst = None
+    if last_run:
+        try:
+            dt_utc = datetime.fromisoformat(last_run["run_at"].replace("Z", "+00:00"))
+            last_run_jst = dt_utc.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+        except Exception:
+            last_run_jst = last_run["run_at"][:16].replace("T", " ") + " UTC"
+
+    # ヘルス情報: 直近1時間のスクレイプログを集計
+    health = conn.execute("""
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) as ok_count,
+            SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count
+        FROM scrape_log
+        WHERE run_at > datetime('now', '-1 hour')
+    """).fetchone()
+
+    # エラーが続いてるアカウントを抽出（直近3回全部errorのもの）
+    error_accounts = conn.execute("""
+        SELECT screen_name, COUNT(*) as err_count
+        FROM scrape_log
+        WHERE status = 'error'
+          AND run_at > datetime('now', '-3 hours')
+        GROUP BY screen_name
+        HAVING err_count >= 2
+        ORDER BY err_count DESC
+        LIMIT 5
+    """).fetchall()
+
     conn.close()
 
     tweets = []
@@ -101,7 +132,9 @@ def index():
         current_category=category,
         counts=counts,
         total_count=total_count,
-        last_run=last_run["run_at"] if last_run else None,
+        last_run_jst=last_run_jst,
+        health=dict(health) if health else None,
+        error_accounts=[dict(a) for a in error_accounts],
     )
 
 
