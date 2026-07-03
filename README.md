@@ -1,7 +1,22 @@
-# X-RAY
+# X-Ray
 
-NotionのXアカウントDBを元に、監視対象44アカウントの投稿を30分おきに取得し、
+NotionのXアカウントDBを元に、監視対象アカウントの投稿を30分おきに取得し、
 カテゴリ別に切り替えて見られるWebビューア。
+
+## 技術スタック
+
+| レイヤー | 技術 | 備考 |
+|---|---|---|
+| **スクレイピング** | [twscrape](https://github.com/vladkens/twscrape) | XのモバイルAPIを叩く非公式ライブラリ |
+| **HTTPバックエンド** | curl-cffi | CloudflareのTLSフィンガープリント対策 |
+| **認証方式** | クッキー認証（auth_token + ct0） | パスワードログインはbot判定でブロックされるため |
+| **データストア** | SQLite | WALモードで運用 |
+| **Webフレームワーク** | Flask | Jinja2テンプレートでSSRレンダリング |
+| **インフラ** | Docker Compose | workerとwebの2コンテナ構成 |
+| **定期実行** | cron（コンテナ内） | 30分おきにスクレイプ |
+| **フロントエンド** | Vanilla JS + CSS | フレームワーク不使用 |
+| **アイコン取得** | [unavatar.io](https://unavatar.io) | RT元アカウントのアイコン取得に使用 |
+| **動作環境** | Ubuntu Linux + Docker | 自宅サーバー想定 |
 
 ## 構成
 

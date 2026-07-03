@@ -128,11 +128,18 @@ def save_tweets(screen_name: str, tweets: list):
                     "url": t.url,
                 })
 
+        # 自己リプライ元のtweet_idを取得
+        reply_to_id = None
+        if t.inReplyToTweetId and t.inReplyToUser:
+            # 同一アカウントへのリプライのみ記録
+            if str(t.inReplyToUser.username).lower() == screen_name.lower():
+                reply_to_id = str(t.inReplyToTweetId)
+
         cur.execute("""
         INSERT INTO tweets
         (tweet_id, screen_name, content, created_at, url,
-         like_count, retweet_count, reply_count, media_json, video_json, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         like_count, retweet_count, reply_count, media_json, video_json, reply_to_tweet_id, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tweet_id) DO UPDATE SET
             like_count=excluded.like_count,
             retweet_count=excluded.retweet_count,
@@ -148,6 +155,7 @@ def save_tweets(screen_name: str, tweets: list):
             t.replyCount or 0,
             json.dumps(photo_urls, ensure_ascii=False),
             json.dumps(video_items, ensure_ascii=False),
+            reply_to_id,
             datetime.now(timezone.utc).isoformat(),
         ))
         if cur.rowcount and cur.lastrowid:

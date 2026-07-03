@@ -45,16 +45,21 @@ def init_db():
         reply_count INTEGER DEFAULT 0,
         media_json TEXT,            -- JSON array of photo urls
         video_json TEXT,            -- JSON array of {thumb, url} for videos
+        reply_to_tweet_id TEXT,     -- 自己リプライ元のtweet_id
         fetched_at TEXT,
         FOREIGN KEY (screen_name) REFERENCES accounts(screen_name)
     )
     """)
 
-    # 既存DBへのマイグレーション（video_jsonカラムがなければ追加）
+    # 既存DBへのマイグレーション
     try:
         cur.execute("ALTER TABLE tweets ADD COLUMN video_json TEXT")
     except Exception:
-        pass  # すでに存在する場合は無視
+        pass
+    try:
+        cur.execute("ALTER TABLE tweets ADD COLUMN reply_to_tweet_id TEXT")
+    except Exception:
+        pass
 
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_tweets_created

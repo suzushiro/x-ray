@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>X-RAY</title>
+<title>X-Ray</title>
 <script>
 // ページ描画前にテーマを即適用（チカチカ防止）
 (function() {
@@ -47,6 +47,16 @@ header {
 }
 .header-left { flex: 1; }
 header h1 { font-size: 18px; margin: 0 0 2px 0; }
+.alpha { font-size: 12px; font-weight: 400; color: var(--text-dim); margin-left: 3px; vertical-align: middle; }
+
+.github-btn {
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 50%;
+    color: var(--text-dim);
+    transition: color 0.15s, background 0.15s;
+}
+.github-btn:hover { color: var(--text); background: var(--surface); }
 .meta { font-size: 12px; color: var(--text-dim); }
 
 .theme-btn {
@@ -89,6 +99,21 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 
 .tweet { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .tweet:hover { background: var(--surface-hover); }
+
+/* 自己リプライのぶら下がり表示 */
+.tweet.self-reply {
+    padding-left: 40px;
+    position: relative;
+    border-bottom: 1px solid var(--border);
+}
+.reply-connector {
+    position: absolute;
+    left: 22px;
+    top: -12px;
+    width: 2px;
+    height: 20px;
+    background: var(--border);
+}
 
 .tweet.is-rt {
     border-left: 3px solid var(--accent);
@@ -189,12 +214,17 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 
 <header>
     <div class="header-left">
-        <h1>X-RAY</h1>
+        <h1>X-Ray<span class="alpha">(α)</span></h1>
         <div class="meta">
             全{{ total_count }}件
             {% if last_run %} ・ 最終更新: {{ last_run[:16].replace('T', ' ') }} UTC{% endif %}
         </div>
     </div>
+    <a href="https://github.com/suzushiro/x-ray" target="_blank" class="github-btn" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+            <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>
+        </svg>
+    </a>
     <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
 </header>
 
@@ -225,9 +255,9 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
             <div class="tweet-head">
                 <div class="avatar">
                     {% if is_rt %}
-                    <img src="https://unavatar.io/twitter/{{ rt_user }}" alt="{{ rt_user }}" loading="lazy" onerror="this.src='https://unavatar.io/twitter/{{ rt_user }}'">
+                    <img src="https://unavatar.io/twitter/{{ rt_user }}" alt="{{ rt_user }}" loading="lazy" onerror="this.onerror=null;this.style.display='none';this.parentNode.textContent='{{ rt_user[:2] }}'">
                     {% elif t.profile_image_url %}
-                    <img src="{{ t.profile_image_url }}" alt="{{ t.display_name }}" loading="lazy" onerror="this.parentNode.textContent='{{ t.display_name[:2] }}'">
+                    <img src="{{ t.profile_image_url }}" alt="{{ t.display_name }}" loading="lazy" onerror="this.onerror=null;this.style.display='none';this.parentNode.textContent='{{ t.display_name[:2] }}'">
                     {% else %}
                     {{ t.display_name[:2] }}
                     {% endif %}
@@ -238,7 +268,7 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
                 <span class="tweet-name">{{ t.display_name }}</span>
                 <span class="tweet-handle">@{{ t.screen_name }}</span>
                 {% endif %}
-                <span class="tweet-time">{{ t.created_at[:16].replace('T', ' ') }}</span>
+                <span class="tweet-time">{{ t.created_at_jst }}</span>
             </div>
             <div class="tweet-cats">
                 {% for c in t.categories_list %}
@@ -248,11 +278,10 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
             <div class="tweet-content">{% if is_rt %}{{ rt_body }}{% else %}{{ t.content }}{% endif %}</div>
 
             {% if t.media %}
-            {% set dt = t.created_at | replace('-','') | replace('T','') | replace(':','') %}
             <div class="tweet-media {% if t.media|length == 1 %}single{% else %}multi{% endif %}"
                  data-imgs="{{ t.media_b64 }}"
                  data-handle="{{ t.screen_name }}"
-                 data-dt="{{ dt[:12] }}">
+                 data-dt="{{ t.created_at_dt }}">
                 {% for m in t.media %}
                 <img src="{{ m }}" loading="lazy" data-idx="{{ loop.index0 }}" onclick="imgClick(this)">
                 {% endfor %}
@@ -279,11 +308,10 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
                 <span class="stat">💬 {{ t.reply_count }}</span>
                 <div class="footer-right">
                     {% if t.media %}
-                    {% set dt = t.created_at | replace('-','') | replace('T','') | replace(':','') %}
                     <button class="dl-btn"
                             data-imgs="{{ t.media_b64 }}"
                             data-handle="{{ t.screen_name }}"
-                            data-dt="{{ dt[:12] }}"
+                            data-dt="{{ t.created_at_dt }}"
                             onclick="dlAllBtn(this)">
                         ↓ {{ t.media|length }}枚
                     </button>
@@ -292,6 +320,55 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
                 </div>
             </div>
         </div>
+
+        {% if t.self_reply %}
+        {% set r = t.self_reply %}
+        {% set r_is_rt = r.content and r.content.startswith('RT @') %}
+        <div class="tweet self-reply{% if r_is_rt %} is-rt{% endif %}">
+            <div class="reply-connector"></div>
+            <div class="tweet-head">
+                <div class="avatar">
+                    {% if r.profile_image_url %}
+                    <img src="{{ r.profile_image_url }}" alt="{{ r.display_name }}" loading="lazy" onerror="this.onerror=null;this.style.display='none';this.parentNode.textContent='{{ r.display_name[:2] }}'">
+                    {% else %}
+                    {{ r.display_name[:2] }}
+                    {% endif %}
+                </div>
+                <span class="tweet-name">{{ r.display_name }}</span>
+                <span class="tweet-handle">@{{ r.screen_name }}</span>
+                <span class="tweet-time">{{ r.created_at_jst }}</span>
+            </div>
+            <div class="tweet-content">{{ r.content }}</div>
+            {% if r.media %}
+            <div class="tweet-media {% if r.media|length == 1 %}single{% else %}multi{% endif %}"
+                 data-imgs="{{ r.media_b64 }}"
+                 data-handle="{{ r.screen_name }}"
+                 data-dt="{{ r.created_at_dt }}">
+                {% for m in r.media %}
+                <img src="{{ m }}" loading="lazy" data-idx="{{ loop.index0 }}" onclick="imgClick(this)">
+                {% endfor %}
+            </div>
+            {% endif %}
+            <div class="tweet-footer">
+                <span class="stat">♥ {{ r.like_count }}</span>
+                <span class="stat">🔁 {{ r.retweet_count }}</span>
+                <span class="stat">💬 {{ r.reply_count }}</span>
+                <div class="footer-right">
+                    {% if r.media %}
+                    <button class="dl-btn"
+                            data-imgs="{{ r.media_b64 }}"
+                            data-handle="{{ r.screen_name }}"
+                            data-dt="{{ r.created_at_dt }}"
+                            onclick="dlAllBtn(this)">
+                        ↓ {{ r.media|length }}枚
+                    </button>
+                    {% endif %}
+                    <a href="{{ r.url }}" target="_blank" class="tweet-link">Xで見る →</a>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
         {% endfor %}
     {% else %}
         <div class="empty">まだ投稿がありません。</div>
