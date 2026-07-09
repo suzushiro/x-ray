@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ブックマーク - X-Ray</title>
+<script>(function(){const t=localStorage.getItem('xray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+</head>
+<body>
+{% from '_macros.html' import tweet_card %}
+<header>
+    <div class="header-left"><h1>★ ブックマーク</h1>
+    <div class="meta">{{ tweets|length }}件保存済み</div></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'bookmarks' %}
+{% include '_nav.html' %}
+<main>
+    {% if tweets %}
+        {% for t in tweets %}{{ tweet_card(t) }}{% endfor %}
+    {% else %}
+        <div class="empty">ブックマークはまだありません。<br>投稿の☆をタップして保存できます。</div>
+    {% endif %}
+</main>
+{% include '_scripts.html' %}
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ account.display_name }} - X-Ray</title>
+<script>(function(){const t=localStorage.getItem('xray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+</head>
+<body>
+{% from '_macros.html' import tweet_card %}
+<header>
+    <div class="header-left"><h1><a href="/" style="text-decoration:none;color:inherit">← X-Ray</a></h1></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+
+<div class="profile-head">
+    <div class="profile-top">
+        <div class="profile-avatar">
+            {% if account.profile_image_url %}<img src="{{ account.profile_image_url }}" alt="">{% endif %}
+        </div>
+        <div>
+            <div class="profile-name">{{ account.display_name }}</div>
+            <div class="profile-handle">@{{ account.screen_name }}</div>
+            <div class="tweet-cats" style="margin-top:6px">
+                {% for c in account.categories_list %}<span class="cat-pill">{{ c }}</span>{% endfor %}
+            </div>
+        </div>
+    </div>
+    <div class="profile-stats">
+        <span><b>{{ stats.total or 0 }}</b> 投稿</span>
+        <span><b>{{ stats.total_likes or 0 }}</b> いいね合計</span>
+    </div>
+    <form class="date-filter" method="get">
+        <input type="date" name="from" value="{{ date_from }}">
+        <span style="color:var(--text-dim)">〜</span>
+        <input type="date" name="to" value="{{ date_to }}">
+        <button type="submit">絞り込み</button>
+        {% if date_from or date_to %}<a href="/user/{{ account.screen_name }}" style="font-size:12px;color:var(--text-dim)">クリア</a>{% endif %}
+    </form>
+</div>
+
+<main>
+    {% if tweets %}
+        {% for t in tweets %}{{ tweet_card(t) }}{% endfor %}
+        <div class="pagination">
+            {% if page > 1 %}<a href="/user/{{ account.screen_name }}?page={{ page-1 }}&from={{ date_from }}&to={{ date_to }}">← 前へ</a>{% else %}<span class="disabled">← 前へ</span>{% endif %}
+            <span>ページ {{ page }}</span>
+            {% if has_next %}<a href="/user/{{ account.screen_name }}?page={{ page+1 }}&from={{ date_from }}&to={{ date_to }}">次へ →</a>{% else %}<span class="disabled">次へ →</span>{% endif %}
+        </div>
+    {% else %}
+        <div class="empty">投稿がありません</div>
+    {% endif %}
+</main>
+{% include '_scripts.html' %}
+</body>
+</html>

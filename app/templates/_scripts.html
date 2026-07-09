@@ -1,0 +1,109 @@
+<div class="lb-wrap" id="lb">
+    <div class="lb-toolbar">
+        <button class="lb-tbtn" id="lb-dl" onclick="lbDownload()">↓ 保存</button>
+        <button class="lb-tbtn" onclick="lbClose()">✕</button>
+    </div>
+    <div class="lb-body" id="lb-body" onclick="lbBodyClick(event)">
+        <button class="lb-nav-btn lb-prev" onclick="lbNav(-1)">‹</button>
+        <img id="lb-img" src="" alt="">
+        <button class="lb-nav-btn lb-next" onclick="lbNav(1)">›</button>
+    </div>
+    <div class="lb-counter" id="lb-counter"></div>
+</div>
+
+<script>
+// テーマ
+function toggleTheme() {
+    const cur = document.documentElement.getAttribute('data-theme');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('xray-theme', next);
+    updateThemeBtn(next);
+}
+function updateThemeBtn(theme) {
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = theme === 'dark' ? '☀️ ライト' : '🌙 ダーク';
+}
+updateThemeBtn(document.documentElement.getAttribute('data-theme'));
+
+// ライトボックス
+let lbImgs = [], lbIdx = 0, lbHandle = '', lbDt = '';
+function lbOpen(imgs, idx, handle, dt) {
+    lbImgs = imgs; lbIdx = idx; lbHandle = handle; lbDt = dt;
+    lbShow();
+    document.getElementById('lb').classList.add('open');
+    document.addEventListener('keydown', lbKey);
+}
+function lbShow() {
+    document.getElementById('lb-img').src = lbImgs[lbIdx];
+    const multi = lbImgs.length > 1;
+    const prev = document.querySelector('.lb-prev'), next = document.querySelector('.lb-next');
+    if (prev) prev.style.display = multi ? '' : 'none';
+    if (next) next.style.display = multi ? '' : 'none';
+    document.getElementById('lb-counter').textContent = multi ? `${lbIdx+1} / ${lbImgs.length}` : '';
+    const btn = document.getElementById('lb-dl'); btn.textContent = '↓ 保存'; btn.disabled = false;
+}
+function lbClose() { document.getElementById('lb').classList.remove('open'); document.removeEventListener('keydown', lbKey); }
+function lbNav(d) { lbIdx = (lbIdx + d + lbImgs.length) % lbImgs.length; lbShow(); }
+function lbBodyClick(e) { if (e.target === document.getElementById('lb-body')) lbClose(); }
+function lbKey(e) { if (e.key === 'Escape') lbClose(); if (e.key === 'ArrowRight') lbNav(1); if (e.key === 'ArrowLeft') lbNav(-1); }
+async function lbDownload() {
+    const btn = document.getElementById('lb-dl'); btn.textContent = '取得中...'; btn.disabled = true;
+    try { await dlOne(lbImgs[lbIdx], `${lbHandle}_${lbDt}_${lbIdx+1}.jpg`); btn.textContent = '✓ 保存済み';
+        setTimeout(() => { btn.textContent = '↓ 保存'; btn.disabled = false; }, 2000);
+    } catch { btn.textContent = '↓ 保存'; btn.disabled = false; }
+}
+function imgClick(imgEl) {
+    const w = imgEl.closest('.tweet-media') || imgEl.closest('.gallery-item');
+    const imgs = JSON.parse(atob(w.dataset.imgs));
+    lbOpen(imgs, parseInt(imgEl.dataset.idx || 0), w.dataset.handle || '', w.dataset.dt || '');
+}
+async function dlOne(url, fn) {
+    const r = await fetch(url); const b = await r.blob();
+    const ext = b.type.split('/')[1] || 'jpg';
+    const a = document.createElement('a'); a.href = URL.createObjectURL(b);
+    a.download = fn.includes('.') ? fn : `${fn}.${ext}`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
+}
+async function dlAllBtn(btnEl) {
+    const imgs = JSON.parse(atob(btnEl.dataset.imgs));
+    const handle = btnEl.dataset.handle, dt = btnEl.dataset.dt;
+    btnEl.textContent = '取得中...'; btnEl.disabled = true;
+    try {
+        for (let i = 0; i < imgs.length; i++) { await dlOne(imgs[i], `${handle}_${dt}_${i+1}.jpg`); await new Promise(r=>setTimeout(r,300)); }
+        btnEl.classList.add('done'); btnEl.textContent = `✓ ${imgs.length}枚完了`;
+        setTimeout(() => { btnEl.classList.remove('done'); btnEl.textContent = `↓ ${imgs.length}枚`; btnEl.disabled = false; }, 2500);
+    } catch { btnEl.textContent = `↓ ${imgs.length}枚`; btnEl.disabled = false; }
+}
+
+// ブックマークトグル
+async function toggleBookmark(btn) {
+    const tid = btn.dataset.tid;
+    const fd = new FormData(); fd.set('tweet_id', tid);
+    try {
+        const res = await fetch('/api/bookmark/toggle', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.ok) {
+            btn.classList.toggle('marked', data.bookmarked);
+            btn.textContent = data.bookmarked ? '★' : '☆';
+        }
+    } catch (e) { console.error(e); }
+}
+
+// 初回transition無効でチカチカ防止
+document.documentElement.classList.add('no-transition');
+requestAnimationFrame(() => { requestAnimationFrame(() => { document.documentElement.classList.remove('no-transition'); }); });
+
+// タブ/ナビのstickyトップをheader高さに合わせる
+function adjustStickyTops() {
+    const header = document.querySelector('header');
+    const nav = document.querySelector('.xnav');
+    const tabs = document.querySelector('.tabs');
+    if (!header) return;
+    const hH = header.offsetHeight;
+    if (nav) nav.style.top = hH + 'px';
+    if (tabs) tabs.style.top = (hH + (nav ? nav.offsetHeight : 0)) + 'px';
+}
+adjustStickyTops();
+window.addEventListener('resize', adjustStickyTops);
+</script>

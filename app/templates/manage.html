@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管理 - X-Ray</title>
+<script>
+(function() {
+    const t = localStorage.getItem('xray-theme') || 'light';
+    document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+<style>
+:root {
+    --bg: #ffffff; --surface: #f7f7f7; --surface-hover: #f0f0f0;
+    --border: #e4e4e4; --text: #0f1419; --text-dim: #536471; --accent: #1d9bf0;
+}
+[data-theme="dark"] {
+    --bg: #0f1419; --surface: #1a1f26; --surface-hover: #232931;
+    --border: #2a3038; --text: #e7e9ea; --text-dim: #8b98a5; --accent: #1d9bf0;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "Hiragino Sans", sans-serif; background: var(--bg); color: var(--text); padding-bottom: 60px; }
+a { color: var(--accent); }
+
+header {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    padding: 12px 16px; display: flex; align-items: center; gap: 12px;
+}
+header h1 { font-size: 18px; flex: 1; }
+.back-link { font-size: 13px; text-decoration: none; }
+
+main { max-width: 680px; margin: 0 auto; padding: 16px; }
+
+.section {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px; margin-bottom: 20px;
+}
+.section h2 { font-size: 15px; margin-bottom: 14px; display: flex; align-items: center; gap: 6px; }
+
+label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 4px; margin-top: 10px; }
+input[type="text"], textarea {
+    width: 100%; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    font-size: 14px; font-family: inherit;
+}
+textarea { resize: vertical; min-height: 120px; font-family: monospace; font-size: 12px; }
+
+.cat-checks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.cat-check {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 10px; border-radius: 16px; border: 1px solid var(--border);
+    background: var(--bg); font-size: 12px; cursor: pointer; user-select: none;
+}
+.cat-check input { display: none; }
+.cat-check.checked { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.btn {
+    margin-top: 14px; padding: 8px 18px; border-radius: 8px;
+    background: var(--accent); color: #fff; border: none;
+    font-size: 14px; cursor: pointer; font-family: inherit;
+}
+.btn:hover { opacity: 0.9; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-danger { background: #f4212e; padding: 4px 10px; font-size: 12px; margin: 0; }
+
+.msg { margin-top: 10px; padding: 8px 12px; border-radius: 8px; font-size: 13px; display: none; }
+.msg.ok { background: rgba(0,186,124,0.12); color: #00ba7c; display: block; }
+.msg.err { background: rgba(244,33,46,0.12); color: #f4212e; display: block; }
+
+.account-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.account-row:last-child { border-bottom: none; }
+.account-info { flex: 1; }
+.account-name { font-weight: 600; }
+.account-handle { color: var(--text-dim); font-size: 12px; }
+.account-cats { display: flex; gap: 4px; margin-top: 3px; flex-wrap: wrap; }
+.mini-pill { font-size: 10px; background: var(--bg); border: 1px solid var(--border); color: var(--text-dim); padding: 1px 6px; border-radius: 8px; }
+.account-count { font-size: 12px; color: var(--text-dim); }
+
+.hint { font-size: 12px; color: var(--text-dim); margin-top: 6px; line-height: 1.5; }
+.hint code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>⚙ 管理</h1>
+    <a href="/" class="back-link">← ビューアに戻る</a>
+</header>
+
+<main>
+    <!-- アカウント追加 -->
+    <div class="section">
+        <h2>➕ 監視対象アカウントを追加</h2>
+        <label>ユーザー名（@は不要）</label>
+        <input type="text" id="add-screen-name" placeholder="例: nemoto_nagi">
+        <label>表示名</label>
+        <input type="text" id="add-display-name" placeholder="例: 根本凪">
+        <label>カテゴリ（複数選択可）</label>
+        <div class="cat-checks" id="add-cats">
+            {% for cat in all_categories %}
+            <label class="cat-check">
+                <input type="checkbox" value="{{ cat }}"> {{ cat }}
+            </label>
+            {% endfor %}
+        </div>
+        <button class="btn" onclick="addAccount()">追加する</button>
+        <div class="msg" id="add-msg"></div>
+        <div class="hint">追加後、次回スクレイプ（15分おき）から取得が始まります。すぐ取得したい場合はサーバーで手動スクレイプを実行してください:<br><code>docker exec -it x-ray-worker python scraper.py</code></div>
+    </div>
+
+    <!-- クッキー更新 -->
+    <div class="section">
+        <h2>🍪 クッキー更新 <span style="font-size:12px;color:var(--text-dim);font-weight:normal">（現在 {{ cookie_count }} 垢登録済み）</span></h2>
+        <label>クッキー情報（1行1アカウント、タブ区切り）</label>
+        <textarea id="cookies-text" placeholder="username1&#9;auth_token=xxxx; ct0=yyyy&#10;username2&#9;auth_token=xxxx; ct0=yyyy"></textarea>
+        <button class="btn" onclick="updateCookies()">クッキーを保存</button>
+        <div class="msg" id="cookies-msg"></div>
+        <div class="hint">
+            取得方法: ブラウザのプライベートウィンドウでXにログイン → F12 → ストレージ/Application → Cookie → x.com<br>
+            <code>auth_token</code> と <code>ct0</code> の値をコピーして上記形式で貼り付け。<br>
+            保存後、サーバーで <code>docker exec -it x-ray-worker python scraper.py add-cookies</code> を実行してください。
+        </div>
+    </div>
+
+    <!-- アカウント一覧 -->
+    <div class="section">
+        <h2>📋 登録済みアカウント（{{ accounts|length }}件）</h2>
+        <div id="account-list">
+            {% for a in accounts %}
+            <div class="account-row" data-sn="{{ a.screen_name }}">
+                <div class="account-info">
+                    <span class="account-name">{{ a.display_name }}</span>
+                    <span class="account-handle">@{{ a.screen_name }}</span>
+                    <div class="account-cats">
+                        {% for c in a.categories %}
+                        <span class="mini-pill">{{ c }}</span>
+                        {% endfor %}
+                    </div>
+                </div>
+                <button class="btn btn-danger" onclick="deleteAccount('{{ a.screen_name }}', this)">削除</button>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</main>
+
+<script>
+// カテゴリチェックボックスのトグル表示
+document.querySelectorAll('.cat-check').forEach(el => {
+    const cb = el.querySelector('input');
+    cb.addEventListener('change', () => el.classList.toggle('checked', cb.checked));
+});
+
+async function addAccount() {
+    const sn = document.getElementById('add-screen-name').value.trim();
+    const dn = document.getElementById('add-display-name').value.trim();
+    const cats = [...document.querySelectorAll('#add-cats input:checked')].map(c => c.value);
+    const msg = document.getElementById('add-msg');
+
+    if (!sn || !dn || cats.length === 0) {
+        msg.className = 'msg err'; msg.textContent = 'すべての項目を入力してください';
+        return;
+    }
+
+    const fd = new FormData();
+    fd.set('screen_name', sn);
+    fd.set('display_name', dn);
+    cats.forEach(c => fd.append('categories', c));
+
+    try {
+        const res = await fetch('/api/account/add', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.ok) {
+            msg.className = 'msg ok'; msg.textContent = `@${sn} を追加しました`;
+            setTimeout(() => location.reload(), 800);
+        } else {
+            msg.className = 'msg err'; msg.textContent = data.error;
+        }
+    } catch (e) {
+        msg.className = 'msg err'; msg.textContent = '通信エラー: ' + e;
+    }
+}
+
+async function deleteAccount(sn, btn) {
+    if (!confirm(`@${sn} を削除しますか？（保存済みツイートも削除されます）`)) return;
+    const fd = new FormData();
+    fd.set('screen_name', sn);
+    try {
+        const res = await fetch('/api/account/delete', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.ok) {
+            btn.closest('.account-row').remove();
+        } else {
+            alert(data.error);
+        }
+    } catch (e) { alert('通信エラー: ' + e); }
+}
+
+async function updateCookies() {
+    const text = document.getElementById('cookies-text').value;
+    const msg = document.getElementById('cookies-msg');
+    if (!text.trim()) {
+        msg.className = 'msg err'; msg.textContent = 'クッキー情報が空です';
+        return;
+    }
+    const fd = new FormData();
+    fd.set('cookies_text', text);
+    try {
+        const res = await fetch('/api/cookies/update', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.ok) {
+            msg.className = 'msg ok';
+            msg.textContent = `${data.count}垢分のクッキーを保存しました。サーバーで add-cookies を実行してください。`;
+        } else {
+            msg.className = 'msg err'; msg.textContent = data.error;
+        }
+    } catch (e) {
+        msg.className = 'msg err'; msg.textContent = '通信エラー: ' + e;
+    }
+}
+</script>
+</body>
+</html>

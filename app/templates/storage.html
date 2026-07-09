@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ストレージ - X-Ray</title>
+<script>(function(){const t=localStorage.getItem('xray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+</head>
+<body>
+<header>
+    <div class="header-left"><h1>📊 ストレージ</h1></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'storage' %}
+{% include '_nav.html' %}
+
+<div class="storage-wrap">
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">💾 アーカイブ使用量</h3>
+        <div class="storage-row"><span class="label">データベース</span><span class="value">{{ db_size }}</span></div>
+        <div class="storage-row"><span class="label">画像アーカイブ（{{ img_count }}枚）</span><span class="value">{{ img_size }}</span></div>
+        <div class="storage-row"><span class="label">合計</span><span class="value">{{ total_size }}</span></div>
+    </div>
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">🗂 データ統計</h3>
+        <div class="storage-row"><span class="label">保存ツイート数</span><span class="value">{{ tweet_count }}</span></div>
+        <div class="storage-row"><span class="label">ブックマーク数</span><span class="value">{{ bookmark_count }}</span></div>
+    </div>
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">🖥 ディスク使用状況（ベストエフォート）</h3>
+        <div class="storage-row"><span class="label">使用中</span><span class="value">{{ disk_used }} / {{ disk_total }}</span></div>
+        <div class="storage-row"><span class="label">空き容量</span><span class="value">{{ disk_free }}</span></div>
+        <div class="disk-bar"><div class="fill" style="width:{{ disk_pct }}%"></div></div>
+        <div style="text-align:right;font-size:12px;color:var(--text-dim);margin-top:4px">{{ disk_pct }}% 使用</div>
+    </div>
+</div>
+<script>
+function toggleTheme(){const c=document.documentElement.getAttribute('data-theme');const n=c==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',n);localStorage.setItem('xray-theme',n);document.getElementById('theme-btn').textContent=n==='dark'?'☀️ ライト':'🌙 ダーク';}
+updateThemeBtn=function(t){const b=document.getElementById('theme-btn');if(b)b.textContent=t==='dark'?'☀️ ライト':'🌙 ダーク';};
+updateThemeBtn(document.documentElement.getAttribute('data-theme'));
+</script>
+</body>
+</html>

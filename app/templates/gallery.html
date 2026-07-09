@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ギャラリー - X-Ray</title>
+<script>(function(){const t=localStorage.getItem('xray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+</head>
+<body>
+<header>
+    <div class="header-left"><h1>🖼 ギャラリー</h1>
+    <div class="meta">{{ items|length }}枚表示中</div></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'gallery' %}
+{% include '_nav.html' %}
+
+<nav class="tabs">
+    <a href="/gallery?category=all{% if show_r18 %}&r18=1{% endif %}" class="tab {% if current_category=='all' %}active{% endif %}">すべて</a>
+    {% for cat in categories %}
+    {% if cat != 'R18' or show_r18 %}
+    <a href="/gallery?category={{ cat }}{% if show_r18 %}&r18=1{% endif %}" class="tab {% if current_category==cat %}active{% endif %}">{{ cat }}</a>
+    {% endif %}
+    {% endfor %}
+    <a href="/gallery?category={{ current_category }}{% if not show_r18 %}&r18=1{% endif %}" class="r18-toggle {% if show_r18 %}on{% endif %}" style="margin-left:8px">
+        {% if show_r18 %}🔞 R18 ON{% else %}🔞 R18 OFF{% endif %}
+    </a>
+</nav>
+
+{% if items %}
+<div class="gallery-grid">
+    {% for it in items %}
+    <div class="gallery-item" data-imgs="{{ [it.img] | tojson | b64encode }}" data-idx="0" onclick="imgClick(this)">
+        <img src="{{ it.img }}" loading="lazy" alt="">
+        <div class="gi-overlay">@{{ it.screen_name }}</div>
+    </div>
+    {% endfor %}
+</div>
+<div class="pagination">
+    {% if page > 1 %}<a href="/gallery?category={{ current_category }}&page={{ page-1 }}{% if show_r18 %}&r18=1{% endif %}">← 前へ</a>{% else %}<span class="disabled">← 前へ</span>{% endif %}
+    <span>ページ {{ page }}</span>
+    {% if has_next %}<a href="/gallery?category={{ current_category }}&page={{ page+1 }}{% if show_r18 %}&r18=1{% endif %}">次へ →</a>{% else %}<span class="disabled">次へ →</span>{% endif %}
+</div>
+{% else %}
+<div class="empty">画像がありません</div>
+{% endif %}
+
+{% include '_scripts.html' %}
+</body>
+</html>

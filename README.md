@@ -1,6 +1,6 @@
 # X-Ray
 
-NotionのXアカウントDBを元に、監視対象アカウントの投稿を30分おきに取得し、
+NotionのXアカウントDBを元に、監視対象アカウントの投稿を15分おきに取得し、
 カテゴリ別に切り替えて見られるWebビューア。
 
 ## 技術スタック
@@ -13,7 +13,7 @@ NotionのXアカウントDBを元に、監視対象アカウントの投稿を30
 | **データストア** | SQLite | WALモードで運用 |
 | **Webフレームワーク** | Flask | Jinja2テンプレートでSSRレンダリング |
 | **インフラ** | Docker Compose | workerとwebの2コンテナ構成 |
-| **定期実行** | cron（コンテナ内） | 30分おきにスクレイプ |
+| **定期実行** | cron（コンテナ内） | 15分おきにスクレイプ |
 | **フロントエンド** | Vanilla JS + CSS | フレームワーク不使用 |
 | **アイコン取得** | [unavatar.io](https://unavatar.io) | RT元アカウントのアイコン取得に使用 |
 | **動作環境** | Ubuntu Linux + Docker | 自宅サーバー想定 |
@@ -22,7 +22,7 @@ NotionのXアカウントDBを元に、監視対象アカウントの投稿を30
 
 ```
 worker (Python + twscrape + cron)
-  └─ 30分おきに監視対象の最新ツイートを取得 → SQLiteに保存
+  └─ 15分おきに監視対象の最新ツイートを取得 → SQLiteに保存
 
 web (Flask)
   └─ http://<host>:8501 でカテゴリタブ切り替えビューア
@@ -79,7 +79,7 @@ docker exec -it x-ray-worker python scraper.py add-cookies
 docker exec -it x-ray-worker python scraper.py
 ```
 
-`[*] 全件取得完了` まで待つ（数分かかる）。以後は30分おきにcronで自動実行される。
+`[*] 全件取得完了` まで待つ（数分かかる）。以後は15分おきにcronで自動実行される。
 
 ### 6. ブラウザで確認
 
@@ -94,51 +94,33 @@ http://<サーバーのIP>:8501
 - **ログ確認**: `docker exec -it x-ray-worker tail -f /var/log/scraper.log`
 - **状態確認画面**: `http://<host>:8501/status` でアカウントごとの最終取得時刻・エラー履歴が見れる
 - **再ログインが必要になったら**: `docker exec -it x-ray-worker python scraper.py relogin`
-- **監視対象を増やしたい・編集したい**: `app/seed_accounts.py` を編集 → `docker compose restart worker`
-  （既存のworker起動時に自動でUPSERTされる）
+- **監視対象を増やしたい・編集したい**:
 
-  `ACCOUNTS` リストに `(screen_name, display_name, [カテゴリ一覧])` のタプルを追加する：
+  **方法A: Web UI（推奨）** — `http://<host>:8501/manage` の管理ページから
+  アカウントの追加・削除ができる。追加は即DBに反映され、`data/accounts.json` にも保存される。
 
-  ```python
-  ACCOUNTS = [
-      ("nemoto_nagi", "根本凪", ["ギャル"]),
-      # ↓ 新規追加はこのように1行足す
-      ("new_account_id", "表示名", ["カテゴリ名"]),
-      ...
-  ]
+  **方法B: accounts.json を直接編集** — `data/accounts.json` を編集して `docker compose restart worker`。
+  ```json
+  {
+    "categories": ["ギャル", "videogame", "..."],
+    "accounts": [
+      {"screen_name": "nemoto_nagi", "display_name": "根本凪", "categories": ["ギャル"]}
+    ]
+  }
   ```
 
-  - `screen_name`: Xのユーザー名（`@`は付けない、例: `nemoto_nagi`）
+  - `screen_name`: Xのユーザー名（`@`は付けない）
   - `display_name`: 画面に表示される名前（日本語OK）
-  - `categories`: タブ分類用のカテゴリ。1つでも複数（`["ギャル", "artist"]`等）でもOK
+  - `categories`: タブ分類用カテゴリ。新カテゴリを使う場合は `categories` 配列にも追記する
 
-  **新しいカテゴリを使う場合**は、同ファイル下部の `ALL_CATEGORIES` リストにもカテゴリ名を追記しないと、
-  タブ一覧に表示されない（投稿自体は取得・保存されるが、絞り込みタブが出ない状態になる）：
+  監視対象マスタは `data/accounts.json` で一元管理される（`seed_accounts.py` の `ACCOUNTS_FALLBACK`
+  は accounts.json が存在しない場合の初期データとしてのみ使用される）。
 
-  ```python
-  ALL_CATEGORIES = [
-      "ギャル", "videogame", "clubmusic", "artist",
-      "writer", "developer", "illustrator", "news", "photographer",
-      "gadget", "R18",
-      "新しいカテゴリ名",  # ← 追加
-  ]
-  ```
+- **クッキー更新**: `http://<host>:8501/manage` の管理ページからブラウザで貼り付けて更新できる。
+  更新後、サーバーで `docker exec -it x-ray-worker python scraper.py add-cookies` を実行して反映。
 
-  既存アカウントの `screen_name` を変更（Xアカウント名変更時など）した場合、`screen_name` が
-  主キーになっているため、古い名前の行は自動では消えない。手動で消したい場合：
-
-  ```bash
-  docker exec -it x-ray-worker python -c "
-  from db import get_conn
-  conn = get_conn()
-  conn.execute(\"DELETE FROM accounts WHERE screen_name='古いscreen_name'\")
-  conn.execute(\"DELETE FROM tweets WHERE screen_name='古いscreen_name'\")
-  conn.commit()
-  print('削除完了')
-  "
-  ```
-
-- **取得間隔を変えたい**: `Dockerfile.worker` の cron 設定（`*/30 * * * *`）を編集してrebuild
+- **取得間隔を変えたい**: `Dockerfile.worker` の cron 設定（デフォルト `*/15 * * * *` = 15分おき）を編集してrebuild。
+  垢数に余裕があるので10分程度まで縮められるが、5分以下はbot検知リスクが上がる。
 
 ## 注意点
 

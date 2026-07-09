@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>検索 - X-Ray</title>
+<script>(function(){const t=localStorage.getItem('xray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
+{% include '_style.html' %}
+</head>
+<body>
+{% from '_macros.html' import tweet_card %}
+<header>
+    <div class="header-left"><h1>🔍 検索</h1></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+{% set active_page = 'search' %}
+{% include '_nav.html' %}
+
+<form class="search-box" action="/search" method="get">
+    <input type="text" name="q" value="{{ query }}" placeholder="キーワードを入力..." autofocus>
+    <button type="submit">検索</button>
+</form>
+
+<main>
+    {% if query %}
+        <div class="meta" style="max-width:640px;margin:0 auto;padding:0 16px 10px;color:var(--text-dim);font-size:13px">「{{ query }}」の検索結果: {{ results|length }}件</div>
+        {% if results %}
+            {% for t in results %}{{ tweet_card(t) }}{% endfor %}
+        {% else %}
+            <div class="empty">該当する投稿が見つかりませんでした</div>
+        {% endif %}
+    {% else %}
+        <div class="empty">保存済みの投稿からキーワード検索できます</div>
+    {% endif %}
+</main>
+{% include '_scripts.html' %}
+</body>
+</html>

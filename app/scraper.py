@@ -11,6 +11,8 @@ import asyncio
 import json
 import os
 import sys
+import hashlib
+import urllib.request
 from datetime import datetime, timezone
 
 from twscrape import API, gather
@@ -22,6 +24,52 @@ set_log_level("WARNING")
 
 ACCOUNTS_FILE = os.environ.get("TWITTER_ACCOUNTS_FILE", "/data/accounts.txt")
 TWEETS_PER_USER = int(os.environ.get("TWEETS_PER_USER", "10"))
+IMAGES_DIR = os.environ.get("IMAGES_DIR", "/data/images")
+SAVE_IMAGES = os.environ.get("SAVE_IMAGES", "1") == "1"  # 画像ローカル保存の有効/無効
+
+
+def download_image(url: str, screen_name: str, tweet_id: str, idx: int) -> str | None:
+    """画像をローカルに保存し、相対パス（/images/...）を返す。失敗時はNone。"""
+    if not SAVE_IMAGES:
+        return None
+    try:
+        os.makedirs(IMAGES_DIR, exist_ok=True)
+        # 拡張子を推定
+        ext = "jpg"
+        if "?" in url:
+            base = url.split("?")[0]
+        else:
+            base = url
+        if "." in base.split("/")[-1]:
+            ext = base.split(".")[-1][:4]
+        # format=jpg のようなクエリからも推定
+        if "format=png" in url:
+            ext = "png"
+        elif "format=jpg" in url or "format=jpeg" in url:
+            ext = "jpg"
+
+        filename = f"{screen_name}_{tweet_id}_{idx}.{ext}"
+        filepath = os.path.join(IMAGES_DIR, filename)
+
+        # 既に保存済みならスキップ
+        if os.path.exists(filepath):
+            return f"/images/{filename}"
+
+        # X画像は&name=origでオリジナルサイズ取得
+        dl_url = url
+        if "pbs.twimg.com" in url and "name=" not in url:
+            sep = "&" if "?" in url else "?"
+            dl_url = f"{url}{sep}name=orig"
+
+        req = urllib.request.Request(dl_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read()
+        with open(filepath, "wb") as f:
+            f.write(data)
+        return f"/images/{filename}"
+    except Exception as e:
+        print(f"[!] 画像DL失敗 {url[:50]}: {e}")
+        return None
 
 
 async def add_accounts_via_cookies(api: API):
@@ -128,22 +176,29 @@ def save_tweets(screen_name: str, tweets: list):
                     "url": t.url,
                 })
 
+        # 画像をローカル保存（オリジナルサイズ）
+        local_paths = []
+        for i, purl in enumerate(photo_urls):
+            lp = download_image(purl, screen_name, str(t.id), i + 1)
+            local_paths.append(lp)  # 失敗時はNoneが入る
+
         # 自己リプライ元のtweet_idを取得
         reply_to_id = None
         if t.inReplyToTweetId and t.inReplyToUser:
-            # 同一アカウントへのリプライのみ記録
             if str(t.inReplyToUser.username).lower() == screen_name.lower():
                 reply_to_id = str(t.inReplyToTweetId)
 
         cur.execute("""
         INSERT INTO tweets
         (tweet_id, screen_name, content, created_at, url,
-         like_count, retweet_count, reply_count, media_json, video_json, reply_to_tweet_id, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         like_count, retweet_count, reply_count, media_json, video_json,
+         local_media_json, reply_to_tweet_id, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tweet_id) DO UPDATE SET
             like_count=excluded.like_count,
             retweet_count=excluded.retweet_count,
-            reply_count=excluded.reply_count
+            reply_count=excluded.reply_count,
+            local_media_json=excluded.local_media_json
         """, (
             str(t.id),
             screen_name,
@@ -155,11 +210,23 @@ def save_tweets(screen_name: str, tweets: list):
             t.replyCount or 0,
             json.dumps(photo_urls, ensure_ascii=False),
             json.dumps(video_items, ensure_ascii=False),
+            json.dumps(local_paths, ensure_ascii=False),
             reply_to_id,
             datetime.now(timezone.utc).isoformat(),
         ))
-        if cur.rowcount and cur.lastrowid:
+        is_new = cur.rowcount and cur.lastrowid
+        if is_new:
             new_count += 1
+
+        # FTS5に同期（重複を避けるため一旦削除して挿入）
+        try:
+            cur.execute("DELETE FROM tweets_fts WHERE tweet_id = ?", (str(t.id),))
+            cur.execute("""
+                INSERT INTO tweets_fts (tweet_id, content, screen_name, display_name)
+                VALUES (?, ?, ?, ?)
+            """, (str(t.id), t.rawContent or "", screen_name, ""))
+        except Exception:
+            pass  # FTS非対応環境では無視
 
     conn.commit()
     conn.close()

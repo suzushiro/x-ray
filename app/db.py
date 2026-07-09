@@ -60,6 +60,10 @@ def init_db():
         cur.execute("ALTER TABLE tweets ADD COLUMN reply_to_tweet_id TEXT")
     except Exception:
         pass
+    try:
+        cur.execute("ALTER TABLE tweets ADD COLUMN local_media_json TEXT")  # ローカル保存画像パス
+    except Exception:
+        pass
 
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_tweets_created
@@ -70,6 +74,37 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_tweets_screen_name
     ON tweets(screen_name)
     """)
+
+    # ブックマークテーブル（ツイート内容をコピー保存して永続化）
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS bookmarks (
+        tweet_id TEXT PRIMARY KEY,
+        screen_name TEXT,
+        display_name TEXT,
+        content TEXT,
+        created_at TEXT,
+        url TEXT,
+        media_json TEXT,
+        local_media_json TEXT,
+        video_json TEXT,
+        categories TEXT,
+        profile_image_url TEXT,
+        bookmarked_at TEXT
+    )
+    """)
+
+    # 全文検索用 FTS5 仮想テーブル
+    try:
+        cur.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS tweets_fts USING fts5(
+            tweet_id UNINDEXED,
+            content,
+            screen_name UNINDEXED,
+            display_name UNINDEXED
+        )
+        """)
+    except Exception as e:
+        print(f"[!] FTS5テーブル作成失敗（SQLiteがFTS5非対応の可能性）: {e}")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS scrape_log (

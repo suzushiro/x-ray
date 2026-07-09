@@ -11,8 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ .
 
-# 30分おきに実行する cron 設定（環境変数を明示的に引き継ぐ）
-RUN echo "*/30 * * * * cd /app && TWS_HTTP_BACKEND=curl /usr/local/bin/python scraper.py >> /var/log/scraper.log 2>&1" > /etc/cron.d/scraper-cron \
+# 15分おきに実行する cron 設定（環境変数を明示的に引き継ぐ）
+RUN echo "*/15 * * * * cd /app && TWS_HTTP_BACKEND=curl /usr/local/bin/python scraper.py >> /var/log/scraper.log 2>&1" > /etc/cron.d/scraper-cron \
     && chmod 0644 /etc/cron.d/scraper-cron \
     && crontab /etc/cron.d/scraper-cron \
     && touch /var/log/scraper.log

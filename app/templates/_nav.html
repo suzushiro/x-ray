@@ -1,0 +1,8 @@
+<nav class="xnav" style="top: {{ nav_top | default(0) }}px;">
+    <a href="/" class="{% if active_page == 'home' %}active{% endif %}">🏠 ホーム</a>
+    <a href="/gallery" class="{% if active_page == 'gallery' %}active{% endif %}">🖼 ギャラリー</a>
+    <a href="/bookmarks" class="{% if active_page == 'bookmarks' %}active{% endif %}">★ ブックマーク</a>
+    <a href="/search" class="{% if active_page == 'search' %}active{% endif %}">🔍 検索</a>
+    <a href="/storage" class="{% if active_page == 'storage' %}active{% endif %}">📊 ストレージ</a>
+    <a href="/status" class="{% if active_page == 'status' %}active{% endif %}">⚙ 状態</a>
+</nav>

@@ -12,6 +12,10 @@ services:
     environment:
       - DB_PATH=/data/data.db
       - TWITTER_ACCOUNTS_FILE=/data/accounts.txt
+      - TWITTER_COOKIES_FILE=/data/cookies.txt
+      - ACCOUNTS_JSON_PATH=/data/accounts.json
+      - IMAGES_DIR=/data/images
+      - SAVE_IMAGES=1
       - TWEETS_PER_USER=10
       - TWS_HTTP_BACKEND=curl
 
@@ -27,5 +31,8 @@ services:
       - ./data:/data
     environment:
       - DB_PATH=/data/data.db
+      - TWITTER_COOKIES_FILE=/data/cookies.txt
+      - ACCOUNTS_JSON_PATH=/data/accounts.json
+      - IMAGES_DIR=/data/images
     depends_on:
       - worker
