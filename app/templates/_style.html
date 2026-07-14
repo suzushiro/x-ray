@@ -234,6 +234,25 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 .xnav a:hover { background: var(--surface); color: var(--text); }
 .xnav a.active { background: var(--accent); color: #fff; }
 
+/* ===== スペースカード ===== */
+.space-card {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px; margin-bottom: 10px;
+    border-radius: 12px; text-decoration: none;
+    border: 1px solid #7c3aed44;
+    background: linear-gradient(135deg, #7c3aed18, #a855f708);
+    transition: background 0.15s;
+}
+.space-card:hover { background: linear-gradient(135deg, #7c3aed2a, #a855f715); }
+.space-icon {
+    width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: #7c3aed; font-size: 19px;
+}
+.space-body { display: flex; flex-direction: column; gap: 2px; }
+.space-label { font-size: 14px; font-weight: 700; color: #a855f7; }
+.space-sub { font-size: 12px; color: var(--text-dim); }
+
 /* ===== ブックマークボタン ===== */
 .bm-btn {
     background: none; border: none; cursor: pointer;

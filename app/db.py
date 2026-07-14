@@ -117,6 +117,35 @@ def init_db():
     )
     """)
 
+    # 画像の重複排除用インデックス。
+    # リポスト/引用RTでは同じ pbs.twimg.com URL が何度も出てくるため、
+    # URL→保存済みファイル名 を引けるようにして再DLせずハードリンクを張る。
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS media_index (
+        remote_url TEXT PRIMARY KEY,
+        filename   TEXT NOT NULL,
+        persist    INTEGER NOT NULL DEFAULT 0,
+        sha256     TEXT,
+        created_at TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_media_index_sha ON media_index(sha256)
+    """)
+
+    # scrape_log は 15分 x アカウント数 で急速に増える。
+    # トップページが run_at で絞り込むためインデックス必須。
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_scrape_log_run_at
+    ON scrape_log(run_at DESC)
+    """)
+
+    # ユーザーページ用の複合インデックス
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_tweets_sn_created
+    ON tweets(screen_name, created_at DESC)
+    """)
+
     conn.commit()
     conn.close()
 

@@ -1,4 +1,8 @@
-version: "3.8"
+x-image-env: &image-env
+  IMAGES_DIR: /data/images          # 永続保存（削除しない）
+  CACHE_DIR: /data/cache            # 表示用キャッシュ（自動/手動削除）
+  PERSIST_CATEGORIES: "ギャル,illustrator,photographer,gadget"  # 永続対象カテゴリ（カンマ区切り）
+  CACHE_RETENTION_DAYS: "30"        # キャッシュ自動削除の閾値（日）
 
 services:
   worker:
@@ -10,14 +14,16 @@ services:
     volumes:
       - ./data:/data
     environment:
-      - DB_PATH=/data/data.db
-      - TWITTER_ACCOUNTS_FILE=/data/accounts.txt
-      - TWITTER_COOKIES_FILE=/data/cookies.txt
-      - ACCOUNTS_JSON_PATH=/data/accounts.json
-      - IMAGES_DIR=/data/images
-      - SAVE_IMAGES=1
-      - TWEETS_PER_USER=10
-      - TWS_HTTP_BACKEND=curl
+      <<: *image-env
+      DB_PATH: /data/data.db
+      TWITTER_ACCOUNTS_FILE: /data/accounts.txt
+      TWITTER_COOKIES_FILE: /data/cookies.txt
+      ACCOUNTS_JSON_PATH: /data/accounts.json
+      TWSCRAPE_DB: /data/accounts_pool.db   # twscrapeのXアカウントプール（再ビルドで消えないよう永続化）
+      SAVE_IMAGES: "1"
+      TWEETS_PER_USER: "10"
+      SCRAPE_LOG_RETENTION_DAYS: "7"   # スクレイプログの保持日数
+      TWS_HTTP_BACKEND: curl
 
   web:
     build:
@@ -30,9 +36,9 @@ services:
     volumes:
       - ./data:/data
     environment:
-      - DB_PATH=/data/data.db
-      - TWITTER_COOKIES_FILE=/data/cookies.txt
-      - ACCOUNTS_JSON_PATH=/data/accounts.json
-      - IMAGES_DIR=/data/images
+      <<: *image-env
+      DB_PATH: /data/data.db
+      TWITTER_COOKIES_FILE: /data/cookies.txt
+      ACCOUNTS_JSON_PATH: /data/accounts.json
     depends_on:
       - worker

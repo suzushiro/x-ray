@@ -8,7 +8,7 @@
 <div class="tweet{% if is_rt %} is-rt{% endif %}">
     {% if is_rt %}
     <div class="rt-header">
-        🔁 {{ t.display_name }} が <a href="https://x.com/{{ rt_user }}" target="_blank">@{{ rt_user }}</a> をリツイート
+        🔁 {{ t.display_name }} が <a href="https://x.com/{{ rt_user }}" target="_blank">@{{ rt_user }}</a> をリポスト
     </div>
     {% endif %}
     <div class="tweet-head">
@@ -35,6 +35,16 @@
         {% endfor %}
     </div>
     <div class="tweet-content">{% if is_rt %}{{ rt_body }}{% else %}{{ t.content }}{% endif %}</div>
+
+    {% if t.space %}
+    <a href="{{ t.space.url }}" target="_blank" class="space-card">
+        <div class="space-icon">🎙</div>
+        <div class="space-body">
+            <div class="space-label">スペース</div>
+            <div class="space-sub">Xで聴く ↗</div>
+        </div>
+    </a>
+    {% endif %}
 
     {% if t.display_imgs %}
     <div class="tweet-media {% if t.display_imgs|length == 1 %}single{% else %}multi{% endif %}"
@@ -89,6 +99,15 @@
         <span class="tweet-time">{{ r.created_at_jst }}</span>
     </div>
     <div class="tweet-content">{{ r.content }}</div>
+    {% if r.space %}
+    <a href="{{ r.space.url }}" target="_blank" class="space-card">
+        <div class="space-icon">🎙</div>
+        <div class="space-body">
+            <div class="space-label">スペース</div>
+            <div class="space-sub">Xで聴く ↗</div>
+        </div>
+    </a>
+    {% endif %}
     {% if r.display_imgs %}
     <div class="tweet-media {% if r.display_imgs|length == 1 %}single{% else %}multi{% endif %}"
          data-imgs="{{ r.media_b64 }}" data-handle="{{ r.screen_name }}" data-dt="{{ r.created_at_dt }}">

@@ -1,5 +1,7 @@
 import json
 import os
+import time
+import re
 import base64
 import shutil
 import subprocess
@@ -8,10 +10,41 @@ from flask import Flask, render_template, request, redirect, url_for, jsonify, s
 
 JST = timezone(timedelta(hours=9))
 
+# スペースURLの検出パターン
+SPACE_URL_RE = re.compile(r'https?://(?:twitter\.com|x\.com)/i/spaces/([A-Za-z0-9_-]+)')
+
+from flask import g
 from db import get_conn
 import seed_accounts
+import cache_utils
+from cache_utils import CACHE_DIR, IMAGES_DIR, PERSIST_CATEGORIES
 
 app = Flask(__name__)
+
+
+def db():
+    """
+    リクエスト単位でSQLiteコネクションを再利用し、teardownで必ず閉じる。
+    途中で例外が出てもリークしない（WALロック残り対策）。
+    """
+    if "conn" not in g:
+        g.conn = get_conn()
+    return g.conn
+
+
+@app.teardown_appcontext
+def close_db(exc):
+    conn = g.pop("conn", None)
+    if conn is not None:
+        conn.close()
+
+
+def page_arg(name="page"):
+    """?page=abc のような不正値で500にならないようにする"""
+    try:
+        return max(1, int(request.args.get(name, 1)))
+    except (TypeError, ValueError):
+        return 1
 
 
 @app.template_filter("b64encode")
@@ -22,8 +55,8 @@ def b64encode_filter(s):
     return base64.b64encode(s.encode()).decode()
 
 COOKIES_FILE = os.environ.get("TWITTER_COOKIES_FILE", "/data/cookies.txt")
-IMAGES_DIR = os.environ.get("IMAGES_DIR", "/data/images")
 DB_PATH = os.environ.get("DB_PATH", "/data/data.db")
+# IMAGES_DIR(永続) / CACHE_DIR(表示用) は cache_utils で定義
 PER_PAGE = 100  # ページネーション件数
 
 
@@ -31,6 +64,41 @@ def get_categories():
     """最新のカテゴリ一覧を返す（accounts.jsonから動的取得）"""
     accounts, categories = seed_accounts._load_from_json()
     return categories
+
+
+_counts_cache = {"at": 0.0, "counts": None, "total": 0}
+COUNTS_TTL = 60  # 秒
+
+
+def get_category_counts(conn, categories_list):
+    """
+    カテゴリ別ツイート件数。
+    以前はカテゴリ数ぶんCOUNT+LIKEをループしていた（categoriesはJSON文字列なので
+    インデックスが効かず毎回フルスキャン×N回）。1クエリに畳んだうえで60秒キャッシュする。
+    """
+    now = time.time()
+    if _counts_cache["counts"] is not None and now - _counts_cache["at"] < COUNTS_TTL:
+        return _counts_cache["counts"], _counts_cache["total"]
+
+    counts = {c: 0 for c in categories_list}
+    total = 0
+    # accounts.categories の組み合わせは高々アカウント数ぶんしか無いのでGROUP BYで畳める
+    for r in conn.execute("""
+        SELECT a.categories AS cats, COUNT(*) AS cnt
+        FROM tweets t
+        JOIN accounts a ON t.screen_name = a.screen_name
+        GROUP BY a.categories
+    """):
+        total += r["cnt"]
+        try:
+            for c in json.loads(r["cats"] or "[]"):
+                if c in counts:
+                    counts[c] += r["cnt"]
+        except Exception:
+            pass
+
+    _counts_cache.update({"at": now, "counts": counts, "total": total})
+    return counts, total
 
 
 def get_bookmarked_ids(conn):
@@ -69,6 +137,11 @@ def format_tweet(d, bookmarked_ids=None):
         d["created_at_jst"] = (d.get("created_at") or "")[:16].replace("T", " ")
         d["created_at_dt"] = (d.get("created_at") or "")[:16].replace("-", "").replace("T", "").replace(":", "")
 
+    # スペースURLの検出（本文にspaces/URLが含まれていたら専用カード表示用の情報をセット）
+    content = d.get("content") or ""
+    m = SPACE_URL_RE.search(content)
+    d["space"] = {"url": m.group(0), "id": m.group(1)} if m else None
+
     d["is_bookmarked"] = bool(bookmarked_ids and d.get("tweet_id") in bookmarked_ids)
     d["self_reply"] = None
     return d
@@ -76,17 +149,30 @@ def format_tweet(d, bookmarked_ids=None):
 
 @app.route("/images/<path:filename>")
 def serve_image(filename):
-    """ローカル保存した画像を配信"""
-    return send_from_directory(IMAGES_DIR, filename)
+    """永続画像を配信。無ければキャッシュ側にフォールバック。"""
+    if os.path.exists(os.path.join(IMAGES_DIR, filename)):
+        return send_from_directory(IMAGES_DIR, filename)
+    return send_from_directory(CACHE_DIR, filename)
+
+
+@app.route("/cache/<path:filename>")
+def serve_cache(filename):
+    """
+    表示用キャッシュ画像を配信。
+    昇格済み（永続に移動済み）の場合は永続を優先して返す。
+    """
+    if os.path.exists(os.path.join(IMAGES_DIR, filename)):
+        return send_from_directory(IMAGES_DIR, filename)
+    return send_from_directory(CACHE_DIR, filename)
 
 
 @app.route("/")
 def index():
     category = request.args.get("category", "all")
-    page = max(1, int(request.args.get("page", 1)))
+    page = page_arg()
     offset = (page - 1) * PER_PAGE
 
-    conn = get_conn()
+    conn = db()
     bookmarked_ids = get_bookmarked_ids(conn)
 
     if category == "all":
@@ -114,16 +200,7 @@ def index():
 
     # 各カテゴリの件数（タブのバッジ用）
     categories_list = get_categories()
-    counts = {}
-    for cat in categories_list:
-        c = conn.execute("""
-            SELECT COUNT(*) as cnt FROM tweets t
-            JOIN accounts a ON t.screen_name = a.screen_name
-            WHERE a.categories LIKE ?
-        """, (f'%"{cat}"%',)).fetchone()
-        counts[cat] = c["cnt"]
-
-    total_count = conn.execute("SELECT COUNT(*) as cnt FROM tweets").fetchone()["cnt"]
+    counts, total_count = get_category_counts(conn, categories_list)
 
     last_run = conn.execute("""
         SELECT run_at FROM scrape_log ORDER BY run_at DESC LIMIT 1
@@ -160,7 +237,6 @@ def index():
         LIMIT 5
     """).fetchall()
 
-    conn.close()
 
     tweets = [format_tweet(dict(r), bookmarked_ids) for r in rows]
 
@@ -196,14 +272,13 @@ def index():
 def manage():
     accounts, categories = seed_accounts._load_from_json()
     # DBから最終取得状況も取得
-    conn = get_conn()
+    conn = db()
     db_accounts = {
         r["screen_name"]: dict(r)
         for r in conn.execute(
             "SELECT screen_name, last_scraped_at FROM accounts"
         ).fetchall()
     }
-    conn.close()
 
     account_list = []
     for sn, dn, cats in accounts:
@@ -250,7 +325,7 @@ def api_account_add():
     seed_accounts.save_to_json(accounts, all_cats)
 
     # DBにも即反映
-    conn = get_conn()
+    conn = db()
     conn.execute("""
         INSERT INTO accounts (screen_name, display_name, categories)
         VALUES (?, ?, ?)
@@ -259,7 +334,6 @@ def api_account_add():
             categories=excluded.categories
     """, (screen_name, display_name, json.dumps(categories, ensure_ascii=False)))
     conn.commit()
-    conn.close()
 
     return jsonify({"ok": True})
 
@@ -275,11 +349,10 @@ def api_account_delete():
     seed_accounts.save_to_json(accounts, all_cats)
 
     # DBからも削除（ツイートも含めて）
-    conn = get_conn()
+    conn = db()
     conn.execute("DELETE FROM accounts WHERE screen_name=?", (screen_name,))
     conn.execute("DELETE FROM tweets WHERE screen_name=?", (screen_name,))
     conn.commit()
-    conn.close()
 
     return jsonify({"ok": True})
 
@@ -316,7 +389,7 @@ def api_bookmark_toggle():
     if not tweet_id:
         return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
 
-    conn = get_conn()
+    conn = db()
     existing = conn.execute(
         "SELECT tweet_id FROM bookmarks WHERE tweet_id=?", (tweet_id,)
     ).fetchone()
@@ -324,7 +397,6 @@ def api_bookmark_toggle():
     if existing:
         conn.execute("DELETE FROM bookmarks WHERE tweet_id=?", (tweet_id,))
         conn.commit()
-        conn.close()
         return jsonify({"ok": True, "bookmarked": False})
 
     # ツイート本体を取得してコピー保存
@@ -335,10 +407,24 @@ def api_bookmark_toggle():
     """, (tweet_id,)).fetchone()
 
     if not row:
-        conn.close()
-        return jsonify({"ok": False, "error": "ツイートが見つかりません"}), 404
+        return jsonify({"ok": False, "error": "ポストが見つかりません"}), 404
 
     d = dict(row)
+
+    # キャッシュ → 永続へ昇格（ブックマークした画像は消えないようにする）
+    promoted = 0
+    try:
+        local_paths = json.loads(d.get("local_media_json") or "[]")
+    except Exception:
+        local_paths = []
+    if any(p and p.startswith("/cache/") for p in local_paths):
+        local_paths, promoted = cache_utils.promote(local_paths)
+        d["local_media_json"] = json.dumps(local_paths, ensure_ascii=False)
+        conn.execute(
+            "UPDATE tweets SET local_media_json=? WHERE tweet_id=?",
+            (d["local_media_json"], tweet_id),
+        )
+
     conn.execute("""
         INSERT INTO bookmarks
         (tweet_id, screen_name, display_name, content, created_at, url,
@@ -351,17 +437,15 @@ def api_bookmark_toggle():
         datetime.now(timezone.utc).isoformat(),
     ))
     conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "bookmarked": True})
+    return jsonify({"ok": True, "bookmarked": True, "promoted": promoted})
 
 
 @app.route("/bookmarks")
 def bookmarks():
-    conn = get_conn()
+    conn = db()
     rows = conn.execute("""
         SELECT * FROM bookmarks ORDER BY bookmarked_at DESC
     """).fetchall()
-    conn.close()
 
     tweets = []
     for r in rows:
@@ -383,6 +467,8 @@ def bookmarks():
         except Exception:
             d["created_at_jst"] = (d.get("created_at") or "")[:16]
             d["created_at_dt"] = ""
+        m = SPACE_URL_RE.search(d.get("content") or "")
+        d["space"] = {"url": m.group(0), "id": m.group(1)} if m else None
         d["is_bookmarked"] = True
         d["self_reply"] = None
         tweets.append(d)
@@ -394,10 +480,10 @@ def bookmarks():
 def gallery():
     category = request.args.get("category", "all")
     show_r18 = request.args.get("r18", "0") == "1"
-    page = max(1, int(request.args.get("page", 1)))
+    page = page_arg()
     offset = (page - 1) * PER_PAGE
 
-    conn = get_conn()
+    conn = db()
 
     where = ["t.media_json IS NOT NULL", "t.media_json != '[]'"]
     params = []
@@ -417,7 +503,6 @@ def gallery():
         ORDER BY t.created_at DESC
         LIMIT ? OFFSET ?
     """, params_full).fetchall()
-    conn.close()
 
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
@@ -454,7 +539,7 @@ def search():
     q = (request.args.get("q") or "").strip()
     results = []
     if q:
-        conn = get_conn()
+        conn = db()
         bookmarked_ids = get_bookmarked_ids(conn)
         try:
             # FTS5で検索
@@ -475,7 +560,6 @@ def search():
                 WHERE t.content LIKE ?
                 ORDER BY t.created_at DESC LIMIT 200
             """, (f"%{q}%",)).fetchall()
-        conn.close()
         results = [format_tweet(dict(r), bookmarked_ids) for r in rows]
 
     return render_template("search.html", results=results, query=q, categories=get_categories())
@@ -485,17 +569,16 @@ def search():
 def user_profile(screen_name):
     date_from = request.args.get("from", "")
     date_to = request.args.get("to", "")
-    page = max(1, int(request.args.get("page", 1)))
+    page = page_arg()
     offset = (page - 1) * PER_PAGE
 
-    conn = get_conn()
+    conn = db()
     bookmarked_ids = get_bookmarked_ids(conn)
 
     acc = conn.execute(
         "SELECT * FROM accounts WHERE screen_name = ?", (screen_name,)
     ).fetchone()
     if not acc:
-        conn.close()
         return "アカウントが見つかりません", 404
     acc = dict(acc)
     acc["categories_list"] = json.loads(acc.get("categories") or "[]")
@@ -526,7 +609,6 @@ def user_profile(screen_name):
                MAX(created_at) as newest
         FROM tweets WHERE screen_name = ?
     """, (screen_name,)).fetchone()
-    conn.close()
 
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
@@ -546,17 +628,7 @@ def user_profile(screen_name):
 
 def _dir_size(path):
     """ディレクトリの合計サイズと件数をベストエフォートで取得"""
-    total = 0
-    count = 0
-    if os.path.isdir(path):
-        for root, _, files in os.walk(path):
-            for f in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, f))
-                    count += 1
-                except Exception:
-                    pass
-    return total, count
+    return cache_utils.dir_stats(path)
 
 
 def _fmt_size(n):
@@ -576,7 +648,16 @@ def storage():
         if os.path.exists(p):
             db_size += os.path.getsize(p)
 
-    img_size, img_count = _dir_size(IMAGES_DIR)
+    # inodeを共有カウントし、ハードリンク重複を二重に数えない。
+    # 永続を先に数えるので cache_size は「キャッシュを消せば実際に空く容量」になる。
+    seen = set()
+    persist_size, persist_count = cache_utils.dir_stats(IMAGES_DIR, seen)
+    cache_size, cache_count = cache_utils.dir_stats(CACHE_DIR, seen)
+    img_size = persist_size + cache_size
+    img_count = persist_count + cache_count
+
+    # キャッシュのうち保持期間を超えている分（削除見込み）
+    stale = cache_utils.cleanup_cache(dry_run=True)
 
     # ディスク使用量
     try:
@@ -586,16 +667,23 @@ def storage():
         disk_total = disk_used = disk_free = 0
 
     # 統計
-    conn = get_conn()
+    conn = db()
     tweet_count = conn.execute("SELECT COUNT(*) c FROM tweets").fetchone()["c"]
     bookmark_count = conn.execute("SELECT COUNT(*) c FROM bookmarks").fetchone()["c"]
-    conn.close()
 
     return render_template(
         "storage.html",
         db_size=_fmt_size(db_size),
         img_size=_fmt_size(img_size),
         img_count=img_count,
+        persist_size=_fmt_size(persist_size),
+        persist_count=persist_count,
+        cache_size=_fmt_size(cache_size),
+        cache_count=cache_count,
+        stale_count=stale["deleted"],
+        stale_size=_fmt_size(stale["freed"]),
+        retention_days=cache_utils.CACHE_RETENTION_DAYS,
+        persist_categories=PERSIST_CATEGORIES,
         total_size=_fmt_size(db_size + img_size),
         disk_total=_fmt_size(disk_total),
         disk_used=_fmt_size(disk_used),
@@ -606,9 +694,34 @@ def storage():
     )
 
 
+@app.route("/api/cache/cleanup", methods=["POST"])
+def api_cache_cleanup():
+    """
+    キャッシュ手動削除。
+      days 未指定 → CACHE_RETENTION_DAYS（既定30日）より古いものを削除
+      days=0      → 全削除
+    ブックマーク参照中の画像は保護され、削除後にDBのパスも同期される。
+    """
+    raw = request.form.get("days")
+    try:
+        days = None if raw in (None, "") else max(0, int(raw))
+    except ValueError:
+        return jsonify({"ok": False, "error": "daysが不正です"}), 400
+
+    res = cache_utils.cleanup_cache(days=days)
+    return jsonify({
+        "ok": True,
+        "deleted": res["deleted"],
+        "kept": res["kept"],
+        "freed": _fmt_size(res["freed"]),
+        "synced": res["synced"],
+        "days": res["days"],
+    })
+
+
 @app.route("/status")
 def status():
-    conn = get_conn()
+    conn = db()
     logs = conn.execute("""
         SELECT * FROM scrape_log ORDER BY run_at DESC LIMIT 50
     """).fetchall()
@@ -616,9 +729,15 @@ def status():
         SELECT screen_name, display_name, last_scraped_at FROM accounts
         ORDER BY last_scraped_at DESC
     """).fetchall()
-    conn.close()
     return render_template("status.html", logs=logs, accounts=accounts)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # Flaskの開発サーバーは本番非推奨。waitressがあればそちらを使う。
+    try:
+        from waitress import serve
+        print("[*] waitress で起動: 0.0.0.0:5000")
+        serve(app, host="0.0.0.0", port=5000, threads=8)
+    except ImportError:
+        print("[!] waitress未インストール。開発サーバーで起動します。")
+        app.run(host="0.0.0.0", port=5000, debug=False)

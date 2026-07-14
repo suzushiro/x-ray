@@ -5,6 +5,18 @@
 <title>ストレージ - X-Ray</title>
 <script>(function(){const t=localStorage.getItem('xray-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>
 {% include '_style.html' %}
+<style>
+.st-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.st-btn{padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);
+        color:var(--text);font-size:12px;cursor:pointer}
+.st-btn:hover{border-color:var(--accent,#1d9bf0)}
+.st-btn.danger{color:#e0245e;border-color:#e0245e44}
+.st-btn:disabled{opacity:.5;cursor:default}
+.st-note{font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.6}
+.st-badge{display:inline-block;padding:1px 6px;border-radius:999px;font-size:10px;
+          background:var(--bg-hover,#8882);color:var(--text-dim);margin-right:4px}
+#st-msg{font-size:12px;margin-top:8px;min-height:16px}
+</style>
 </head>
 <body>
 <header>
@@ -16,16 +28,40 @@
 
 <div class="storage-wrap">
     <div class="storage-card">
-        <h3 style="font-size:14px;margin-bottom:10px">💾 アーカイブ使用量</h3>
-        <div class="storage-row"><span class="label">データベース</span><span class="value">{{ db_size }}</span></div>
-        <div class="storage-row"><span class="label">画像アーカイブ（{{ img_count }}枚）</span><span class="value">{{ img_size }}</span></div>
-        <div class="storage-row"><span class="label">合計</span><span class="value">{{ total_size }}</span></div>
-    </div>
-    <div class="storage-card">
-        <h3 style="font-size:14px;margin-bottom:10px">🗂 データ統計</h3>
-        <div class="storage-row"><span class="label">保存ツイート数</span><span class="value">{{ tweet_count }}</span></div>
+        <h3 style="font-size:14px;margin-bottom:10px">🔒 永続保存 <span class="st-badge">/data/images</span></h3>
+        <div class="storage-row"><span class="label">画像（{{ persist_count }}枚）</span><span class="value">{{ persist_size }}</span></div>
         <div class="storage-row"><span class="label">ブックマーク数</span><span class="value">{{ bookmark_count }}</span></div>
+        <div class="st-note">
+            対象カテゴリ:
+            {% for c in persist_categories %}<span class="st-badge">{{ c }}</span>{% endfor %}
+            ＋ ブックマークしたポストの画像（キャッシュから自動昇格）
+        </div>
     </div>
+
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">🧊 表示用キャッシュ <span class="st-badge">/data/cache</span></h3>
+        <div class="storage-row"><span class="label">画像（{{ cache_count }}枚）</span><span class="value">{{ cache_size }}</span></div>
+        <div class="st-note" style="margin-top:0">※サイズは重複排除後の実データ量（永続と共有中の画像は除く）</div>
+        <div class="storage-row"><span class="label">{{ retention_days }}日超過（削除対象）</span><span class="value">{{ stale_count }}枚 / {{ stale_size }}</span></div>
+        <div class="st-actions">
+            <button class="st-btn" id="btn-old" onclick="cacheCleanup(null, this)">🧹 {{ retention_days }}日より古い分を削除</button>
+            <button class="st-btn danger" id="btn-all" onclick="cacheCleanup(0, this)">🗑 キャッシュ全削除</button>
+        </div>
+        <div id="st-msg"></div>
+        <div class="st-note">
+            消してもポスト本文とリモート画像URLは残るため、表示はX側の画像にフォールバックします。<br>
+            ブックマーク済みの画像は保護され、削除されません。自動削除は cron で毎日実行されます。
+        </div>
+    </div>
+
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">💾 合計使用量</h3>
+        <div class="storage-row"><span class="label">データベース</span><span class="value">{{ db_size }}</span></div>
+        <div class="storage-row"><span class="label">画像 合計（{{ img_count }}枚）</span><span class="value">{{ img_size }}</span></div>
+        <div class="storage-row"><span class="label">合計</span><span class="value">{{ total_size }}</span></div>
+        <div class="storage-row"><span class="label">保存ポスト数</span><span class="value">{{ tweet_count }}</span></div>
+    </div>
+
     <div class="storage-card">
         <h3 style="font-size:14px;margin-bottom:10px">🖥 ディスク使用状況（ベストエフォート）</h3>
         <div class="storage-row"><span class="label">使用中</span><span class="value">{{ disk_used }} / {{ disk_total }}</span></div>
@@ -34,10 +70,42 @@
         <div style="text-align:right;font-size:12px;color:var(--text-dim);margin-top:4px">{{ disk_pct }}% 使用</div>
     </div>
 </div>
+
 <script>
 function toggleTheme(){const c=document.documentElement.getAttribute('data-theme');const n=c==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',n);localStorage.setItem('xray-theme',n);document.getElementById('theme-btn').textContent=n==='dark'?'☀️ ライト':'🌙 ダーク';}
 updateThemeBtn=function(t){const b=document.getElementById('theme-btn');if(b)b.textContent=t==='dark'?'☀️ ライト':'🌙 ダーク';};
 updateThemeBtn(document.documentElement.getAttribute('data-theme'));
+
+async function cacheCleanup(days, btn) {
+    if (days === 0 && !confirm('キャッシュ画像をすべて削除します。\n（ブックマーク済みの画像は保護されます）\nよろしいですか？')) return;
+    const msg = document.getElementById('st-msg');
+    const btns = document.querySelectorAll('.st-btn');
+    btns.forEach(b => b.disabled = true);
+    const label = btn.textContent;
+    btn.textContent = '削除中...';
+    msg.textContent = '';
+    try {
+        const fd = new FormData();
+        if (days !== null) fd.set('days', days);
+        const res = await fetch('/api/cache/cleanup', { method: 'POST', body: fd });
+        const d = await res.json();
+        if (d.ok) {
+            msg.style.color = 'var(--text-dim)';
+            msg.textContent = `✓ ${d.deleted}枚削除 / ${d.freed} 解放（保持 ${d.kept}枚）`;
+            setTimeout(() => location.reload(), 1200);
+        } else {
+            msg.style.color = '#e0245e';
+            msg.textContent = '✕ ' + (d.error || '失敗しました');
+            btn.textContent = label;
+            btns.forEach(b => b.disabled = false);
+        }
+    } catch (e) {
+        msg.style.color = '#e0245e';
+        msg.textContent = '✕ 通信エラー';
+        btn.textContent = label;
+        btns.forEach(b => b.disabled = false);
+    }
+}
 </script>
 </body>
 </html>

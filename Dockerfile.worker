@@ -11,10 +11,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ .
 
-# 15分おきに実行する cron 設定（環境変数を明示的に引き継ぐ）
-RUN echo "*/15 * * * * cd /app && TWS_HTTP_BACKEND=curl /usr/local/bin/python scraper.py >> /var/log/scraper.log 2>&1" > /etc/cron.d/scraper-cron \
+# cron は docker-compose の環境変数を引き継がないため、
+# 起動時に /app/cron_env.sh へ書き出して各ジョブで読み込む。
+#   */15  スクレイプ
+#   04:20 キャッシュ自動削除（CACHE_RETENTION_DAYS 日より古い画像）
+RUN printf '%s\n' \
+    '*/15 * * * * cd /app && . /app/cron_env.sh && /usr/local/bin/python scraper.py >> /var/log/scraper.log 2>&1' \
+    '20 4 * * * cd /app && . /app/cron_env.sh && /usr/local/bin/python cache_utils.py >> /var/log/cache_cleanup.log 2>&1' \
+    > /etc/cron.d/scraper-cron \
     && chmod 0644 /etc/cron.d/scraper-cron \
     && crontab /etc/cron.d/scraper-cron \
-    && touch /var/log/scraper.log
+    && touch /var/log/scraper.log /var/log/cache_cleanup.log
 
-CMD ["sh", "-c", "python db.py && python scraper.py; cron -f"]
+CMD ["sh", "-c", "export -p > /app/cron_env.sh && python db.py && python scraper.py; cron -f"]

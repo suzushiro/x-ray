@@ -187,7 +187,7 @@ async function addAccount() {
 }
 
 async function deleteAccount(sn, btn) {
-    if (!confirm(`@${sn} を削除しますか？（保存済みツイートも削除されます）`)) return;
+    if (!confirm(`@${sn} を削除しますか？（保存済みポストも削除されます）`)) return;
     const fd = new FormData();
     fd.set('screen_name', sn);
     try {
