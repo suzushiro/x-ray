@@ -27,9 +27,9 @@ function updateThemeBtn(theme) {
 updateThemeBtn(document.documentElement.getAttribute('data-theme'));
 
 // ライトボックス
-let lbImgs = [], lbIdx = 0, lbHandle = '', lbDt = '';
-function lbOpen(imgs, idx, handle, dt) {
-    lbImgs = imgs; lbIdx = idx; lbHandle = handle; lbDt = dt;
+let lbImgs = [], lbIdx = 0, lbHandle = '', lbDt = '', lbNames = [];
+function lbOpen(imgs, idx, handle, dt, names) {
+    lbImgs = imgs; lbIdx = idx; lbHandle = handle; lbDt = dt; lbNames = names || [];
     lbShow();
     document.getElementById('lb').classList.add('open');
     document.addEventListener('keydown', lbKey);
@@ -47,16 +47,31 @@ function lbClose() { document.getElementById('lb').classList.remove('open'); doc
 function lbNav(d) { lbIdx = (lbIdx + d + lbImgs.length) % lbImgs.length; lbShow(); }
 function lbBodyClick(e) { if (e.target === document.getElementById('lb-body')) lbClose(); }
 function lbKey(e) { if (e.key === 'Escape') lbClose(); if (e.key === 'ArrowRight') lbNav(1); if (e.key === 'ArrowLeft') lbNav(-1); }
+function sanitize(s) { return (s || '').replace(/[\\/:*?"<>|]/g, '_'); }
+function lbFileName() {
+    // 明示名があれば最優先。無ければ handle_date_idx、それも無ければ image_idx
+    if (lbNames[lbIdx]) return sanitize(lbNames[lbIdx]);
+    const h = sanitize(lbHandle), d = sanitize(lbDt);
+    if (h || d) return `${h || 'x'}_${d || 'img'}_${lbIdx+1}.jpg`;
+    return `image_${lbIdx+1}.jpg`;
+}
 async function lbDownload() {
     const btn = document.getElementById('lb-dl'); btn.textContent = '取得中...'; btn.disabled = true;
-    try { await dlOne(lbImgs[lbIdx], `${lbHandle}_${lbDt}_${lbIdx+1}.jpg`); btn.textContent = '✓ 保存済み';
+    try { await dlOne(lbImgs[lbIdx], lbFileName()); btn.textContent = '✓ 保存済み';
         setTimeout(() => { btn.textContent = '↓ 保存'; btn.disabled = false; }, 2000);
     } catch { btn.textContent = '↓ 保存'; btn.disabled = false; }
 }
 function imgClick(imgEl) {
     const w = imgEl.closest('.tweet-media') || imgEl.closest('.gallery-item');
     const imgs = JSON.parse(atob(w.dataset.imgs));
-    lbOpen(imgs, parseInt(imgEl.dataset.idx || 0), w.dataset.handle || '', w.dataset.dt || '');
+    let names = [];
+    if (w.dataset.tid) {
+        // ギャラリー: URLの拡張子を活かして screen_name_tweetid_idx.ext を作る
+        const ext = (imgs[0].split('?')[0].split('.').pop() || 'jpg').slice(0, 4);
+        names = [`${w.dataset.handle}_${w.dataset.tid}_${w.dataset.fidx || 1}.${ext}`];
+    }
+    lbOpen(imgs, parseInt(imgEl.dataset.idx || 0),
+           w.dataset.handle || '', w.dataset.dt || '', names);
 }
 async function dlOne(url, fn) {
     const r = await fetch(url); const b = await r.blob();
@@ -106,4 +121,71 @@ function adjustStickyTops() {
 }
 adjustStickyTops();
 window.addEventListener('resize', adjustStickyTops);
+</script>
+
+<script>
+// ===== 無限スクロール =====
+// data-next-url を持つ番兵(.infinite-sentinel)が見えたら次ページの partial を取得して追記。
+(function () {
+    let loading = false;
+    let done = false;
+
+    function statusEl() { return document.getElementById('infinite-status'); }
+
+    async function loadNext(sentinel) {
+        if (loading || done) return;
+        const url = sentinel.dataset.nextUrl;
+        if (!url) { done = true; return; }
+        loading = true;
+        const st = statusEl();
+        if (st) st.textContent = '読み込み中…';
+
+        try {
+            const sep = url.includes('?') ? '&' : '?';
+            const res = await fetch(url + sep + 'partial=1', {
+                headers: { 'X-Requested-With': 'fetch' }
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const html = await res.text();
+
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html.trim();
+
+            const container = sentinel.parentNode;  // #feed（TL or grid）
+            const newSentinel = tmp.querySelector('.infinite-sentinel');
+
+            // 番兵以外のノードを本体に移す
+            Array.from(tmp.childNodes).forEach(node => {
+                if (node.nodeType === 1 && node.classList.contains('infinite-sentinel')) return;
+                container.insertBefore(node, sentinel);
+            });
+
+            // 古い番兵を差し替え or 終了
+            sentinel.remove();
+            if (newSentinel && newSentinel.dataset.nextUrl) {
+                container.appendChild(newSentinel);
+                observer.observe(newSentinel);
+            } else {
+                done = true;
+                if (st) st.textContent = 'すべて読み込みました';
+            }
+            if (st && !done) st.textContent = '';
+        } catch (e) {
+            if (st) st.textContent = '読み込みに失敗しました（スクロールで再試行）';
+            console.error('infinite scroll:', e);
+        } finally {
+            loading = false;
+        }
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) loadNext(entry.target);
+        });
+    }, { rootMargin: '600px 0px' });  // 手前で先読み
+
+    document.addEventListener('DOMContentLoaded', () => {
+        document.querySelectorAll('.infinite-sentinel').forEach(s => observer.observe(s));
+    });
+})();
 </script>

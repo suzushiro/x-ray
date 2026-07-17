@@ -28,8 +28,15 @@
     </div>
     <div class="profile-stats">
         <span><b>{{ stats.total or 0 }}</b> 投稿</span>
-        <span><b>{{ stats.total_likes or 0 }}</b> いいね合計</span>
+        <span><b>{{ stats.with_media or 0 }}</b> 画像投稿</span>
+        {% if stats.with_video %}<span><b>{{ stats.with_video }}</b> 動画</span>{% endif %}
+        <span><b>{{ stats.total_likes or 0 }}</b> ♡合計</span>
+        <span><b>{{ stats.total_rts or 0 }}</b> 🔁合計</span>
+        {% if stats.per_day %}<span><b>{{ stats.per_day }}</b> 投稿/日</span>{% endif %}
     </div>
+    {% if stats.oldest_jst %}
+    <div class="profile-period">📅 保存範囲: {{ stats.oldest_jst }} 〜 {{ stats.newest_jst }}</div>
+    {% endif %}
     <form class="date-filter" method="get">
         <input type="date" name="from" value="{{ date_from }}">
         <span style="color:var(--text-dim)">〜</span>
@@ -39,17 +46,14 @@
     </form>
 </div>
 
-<main>
+<main id="feed">
     {% if tweets %}
         {% for t in tweets %}{{ tweet_card(t) }}{% endfor %}
-        <div class="pagination">
-            {% if page > 1 %}<a href="/user/{{ account.screen_name }}?page={{ page-1 }}&from={{ date_from }}&to={{ date_to }}">← 前へ</a>{% else %}<span class="disabled">← 前へ</span>{% endif %}
-            <span>ページ {{ page }}</span>
-            {% if has_next %}<a href="/user/{{ account.screen_name }}?page={{ page+1 }}&from={{ date_from }}&to={{ date_to }}">次へ →</a>{% else %}<span class="disabled">次へ →</span>{% endif %}
-        </div>
+        {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}
     {% else %}
         <div class="empty">投稿がありません</div>
     {% endif %}
+    <div class="infinite-status" id="infinite-status"></div>
 </main>
 {% include '_scripts.html' %}
 </body>

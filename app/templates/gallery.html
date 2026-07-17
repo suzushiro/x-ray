@@ -28,19 +28,18 @@
 </nav>
 
 {% if items %}
-<div class="gallery-grid">
+<div class="gallery-grid" id="feed">
     {% for it in items %}
-    <div class="gallery-item" data-imgs="{{ [it.img] | tojson | b64encode }}" data-idx="0" onclick="imgClick(this)">
+    <div class="gallery-item" data-imgs="{{ [it.img] | tojson | b64encode }}" data-idx="0"
+         data-handle="{{ it.screen_name }}" data-tid="{{ it.tweet_id }}" data-fidx="{{ it.idx }}"
+         data-dt="{{ it.created_at[:10] }}" onclick="imgClick(this)">
         <img src="{{ it.img }}" loading="lazy" alt="">
         <div class="gi-overlay">@{{ it.screen_name }}</div>
     </div>
     {% endfor %}
+    {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}
 </div>
-<div class="pagination">
-    {% if page > 1 %}<a href="/gallery?category={{ current_category }}&page={{ page-1 }}{% if show_r18 %}&r18=1{% endif %}">← 前へ</a>{% else %}<span class="disabled">← 前へ</span>{% endif %}
-    <span>ページ {{ page }}</span>
-    {% if has_next %}<a href="/gallery?category={{ current_category }}&page={{ page+1 }}{% if show_r18 %}&r18=1{% endif %}">次へ →</a>{% else %}<span class="disabled">次へ →</span>{% endif %}
-</div>
+<div class="infinite-status" id="infinite-status"></div>
 {% else %}
 <div class="empty">画像がありません</div>
 {% endif %}

@@ -1,0 +1,4 @@
+{# 無限スクロール用: ツイートカード列だけを返すパーシャル（index / user 共通） #}
+{% from '_macros.html' import tweet_card %}
+{% for t in tweets %}{{ tweet_card(t) }}{% endfor %}
+{% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}

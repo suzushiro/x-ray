@@ -198,6 +198,8 @@ def index():
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
 
+    tweets = [format_tweet(dict(r), bookmarked_ids) for r in rows]
+
     # 各カテゴリの件数（タブのバッジ用）
     categories_list = get_categories()
     counts, total_count = get_category_counts(conn, categories_list)
@@ -219,8 +221,8 @@ def index():
     health = conn.execute("""
         SELECT
             COUNT(*) as total,
-            SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) as ok_count,
-            SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count
+            COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0) as ok_count,
+            COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) as error_count
         FROM scrape_log
         WHERE run_at > datetime('now', '-1 hour')
     """).fetchone()
@@ -253,9 +255,14 @@ def index():
                     reply_ids.add(t["tweet_id"])
     tweet_items = [t for t in tweets if t["tweet_id"] not in reply_ids]
 
+    next_url = url_for("index", category=category, page=page + 1) if has_next else None
+    if request.args.get("partial") == "1":
+        return render_template("_feed.html", tweets=tweet_items, next_url=next_url)
+
     return render_template(
         "index.html",
         tweets=tweet_items,
+        next_url=next_url,
         categories=categories_list,
         current_category=category,
         counts=counts,
@@ -521,10 +528,20 @@ def gallery():
                 "display_name": d["display_name"],
                 "url": d["url"],
                 "tweet_id": d["tweet_id"],
+                "idx": i + 1,                      # 何枚目か（ファイル名用）
+                "created_at": d["created_at"],
             })
+
+    next_url = (
+        url_for("gallery", category=category, page=page + 1,
+                **({"r18": 1} if show_r18 else {})) if has_next else None
+    )
+    if request.args.get("partial") == "1":
+        return render_template("_gallery_items.html", items=gallery_items, next_url=next_url)
 
     return render_template(
         "gallery.html",
+        next_url=next_url,
         items=gallery_items,
         categories=get_categories(),
         current_category=category,
@@ -601,28 +618,59 @@ def user_profile(screen_name):
         LIMIT ? OFFSET ?
     """, params + [PER_PAGE + 1, offset]).fetchall()
 
-    # 統計
-    stats = conn.execute("""
+    # 統計（画像数・動画数・期間・1日あたり投稿数も）
+    stats = dict(conn.execute("""
         SELECT COUNT(*) as total,
-               SUM(like_count) as total_likes,
+               COALESCE(SUM(like_count), 0) as total_likes,
+               COALESCE(SUM(retweet_count), 0) as total_rts,
                MIN(created_at) as oldest,
                MAX(created_at) as newest
         FROM tweets WHERE screen_name = ?
+    """, (screen_name,)).fetchone() or {})
+
+    media_stat = conn.execute("""
+        SELECT
+            COALESCE(SUM(CASE WHEN media_json IS NOT NULL AND media_json != '[]' THEN 1 ELSE 0 END), 0) as with_media,
+            COALESCE(SUM(CASE WHEN video_json IS NOT NULL AND video_json != '[]' THEN 1 ELSE 0 END), 0) as with_video
+        FROM tweets WHERE screen_name = ?
     """, (screen_name,)).fetchone()
+    stats["with_media"] = media_stat["with_media"]
+    stats["with_video"] = media_stat["with_video"]
+
+    # 1日あたり投稿数（保存期間ベース、ベストエフォート）
+    stats["per_day"] = None
+    try:
+        if stats.get("oldest") and stats.get("newest") and stats.get("total"):
+            o = datetime.fromisoformat(stats["oldest"].replace("Z", "+00:00"))
+            n = datetime.fromisoformat(stats["newest"].replace("Z", "+00:00"))
+            days = max(1, (n - o).days)
+            stats["per_day"] = round(stats["total"] / days, 1)
+            stats["oldest_jst"] = o.astimezone(JST).strftime("%Y-%m-%d")
+            stats["newest_jst"] = n.astimezone(JST).strftime("%Y-%m-%d")
+    except Exception:
+        pass
 
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
     tweets = [format_tweet(dict(r), bookmarked_ids) for r in rows]
 
+    next_url = (
+        url_for("user_profile", screen_name=screen_name, page=page + 1,
+                **{"from": date_from, "to": date_to}) if has_next else None
+    )
+    if request.args.get("partial") == "1":
+        return render_template("_feed.html", tweets=tweets, next_url=next_url)
+
     return render_template(
         "user.html",
         account=acc,
         tweets=tweets,
-        stats=dict(stats) if stats else {},
+        stats=stats,
         date_from=date_from,
         date_to=date_to,
         page=page,
         has_next=has_next,
+        next_url=next_url,
     )
 
 

@@ -61,17 +61,14 @@
     {% endfor %}
 </nav>
 
-<main>
+<main id="feed">
     {% if tweets %}
         {% for t in tweets %}{{ tweet_card(t) }}{% endfor %}
-        <div class="pagination">
-            {% if page > 1 %}<a href="/?category={{ current_category }}&page={{ page-1 }}">← 前へ</a>{% else %}<span class="disabled">← 前へ</span>{% endif %}
-            <span>ページ {{ page }}</span>
-            {% if has_next %}<a href="/?category={{ current_category }}&page={{ page+1 }}">次へ →</a>{% else %}<span class="disabled">次へ →</span>{% endif %}
-        </div>
+        {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}
     {% else %}
         <div class="empty">まだ投稿がありません。</div>
     {% endif %}
+    <div class="infinite-status" id="infinite-status"></div>
 </main>
 
 <a href="/status" class="status-link">⚙ 状態確認</a>

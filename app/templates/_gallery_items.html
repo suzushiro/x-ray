@@ -1,0 +1,10 @@
+{# 無限スクロール用: ギャラリーのグリッドアイテムだけを返すパーシャル #}
+{% for it in items %}
+<div class="gallery-item" data-imgs="{{ [it.img] | tojson | b64encode }}" data-idx="0"
+     data-handle="{{ it.screen_name }}" data-tid="{{ it.tweet_id }}" data-fidx="{{ it.idx }}"
+     data-dt="{{ it.created_at[:10] }}" onclick="imgClick(this)">
+    <img src="{{ it.img }}" loading="lazy" alt="">
+    <div class="gi-overlay">@{{ it.screen_name }}</div>
+</div>
+{% endfor %}
+{% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}
