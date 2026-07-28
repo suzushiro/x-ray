@@ -64,6 +64,11 @@ def init_db():
         cur.execute("ALTER TABLE tweets ADD COLUMN local_media_json TEXT")  # ローカル保存画像パス
     except Exception:
         pass
+    try:
+        # 引用RTの引用元スナップショット（JSON）。引用元が消えても表示が残るよう内容ごと保存
+        cur.execute("ALTER TABLE tweets ADD COLUMN quoted_json TEXT")
+    except Exception:
+        pass
 
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_tweets_created
@@ -89,9 +94,17 @@ def init_db():
         video_json TEXT,
         categories TEXT,
         profile_image_url TEXT,
+        quoted_json TEXT,
         bookmarked_at TEXT
     )
     """)
+
+    # 既存DBへのマイグレーション（CREATE TABLE の後に置くこと）
+    try:
+        # 引用RTの引用元スナップショット。ブックマーク時に tweets からコピーする
+        cur.execute("ALTER TABLE bookmarks ADD COLUMN quoted_json TEXT")
+    except Exception:
+        pass
 
     # 全文検索用 FTS5 仮想テーブル
     try:

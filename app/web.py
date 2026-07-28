@@ -4,7 +4,6 @@ import time
 import re
 import base64
 import shutil
-import subprocess
 from datetime import datetime, timezone, timedelta
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_from_directory
 
@@ -144,6 +143,21 @@ def format_tweet(d, bookmarked_ids=None):
 
     d["is_bookmarked"] = bool(bookmarked_ids and d.get("tweet_id") in bookmarked_ids)
     d["self_reply"] = None
+
+    # 引用RTの引用元
+    d["quoted"] = None
+    if d.get("quoted_json"):
+        try:
+            q = json.loads(d["quoted_json"])
+            # 引用元の投稿日時をJSTへ
+            try:
+                qdt = datetime.fromisoformat((q.get("created_at") or "").replace("Z", "+00:00"))
+                q["created_at_jst"] = qdt.astimezone(JST).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                q["created_at_jst"] = ""
+            d["quoted"] = q
+        except Exception:
+            d["quoted"] = None
     return d
 
 
@@ -435,12 +449,14 @@ def api_bookmark_toggle():
     conn.execute("""
         INSERT INTO bookmarks
         (tweet_id, screen_name, display_name, content, created_at, url,
-         media_json, local_media_json, video_json, categories, profile_image_url, bookmarked_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         media_json, local_media_json, video_json, categories, profile_image_url,
+         quoted_json, bookmarked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         d["tweet_id"], d["screen_name"], d["display_name"], d["content"],
         d["created_at"], d["url"], d.get("media_json"), d.get("local_media_json"),
         d.get("video_json"), d.get("categories"), d.get("profile_image_url"),
+        d.get("quoted_json"),
         datetime.now(timezone.utc).isoformat(),
     ))
     conn.commit()

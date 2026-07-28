@@ -127,3 +127,20 @@ http://<サーバーのIP>:8501
 - twscrapeはXの内部APIを利用するスクレイピングのため、X側の仕様変更で突然動かなくなる可能性あり
 - アカウントが弾かれた場合は`accounts.txt`に追加で捨て垢を足すか、`relogin`を試す
 - 取得失敗は`/status`画面のログで確認できる
+
+## 検証用スクリプト（dev/）
+
+コンテナには含まれない（`Dockerfile.*` は `app/` のみ COPY する）開発用ツール。
+
+```bash
+cd dev
+export DB_PATH=/tmp/xtest/data.db IMAGES_DIR=/tmp/xtest/images CACHE_DIR=/tmp/xtest/cache
+export TWITTER_COOKIES_FILE=/tmp/xtest/cookies.txt ACCOUNTS_JSON_PATH=/tmp/xtest/accounts.json
+export PERSIST_CATEGORIES="ギャル,illustrator,photographer,gadget" CACHE_RETENTION_DAYS=30
+
+python seed_dummy.py    # 引用RT/画像/動画/自己リプ/ブックマーク入りのダミーDBを作成
+python route_check.py   # 全ルートを叩いてステータス＋引用カードの描画を確認
+```
+
+`requirements-web.txt`（flask + waitress のみ）だけを入れた venv で実行すると、
+web が twscrape 非依存であることも同時に検証できる。

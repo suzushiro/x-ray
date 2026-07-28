@@ -321,17 +321,40 @@ def save_tweets(screen_name: str, tweets: list):
             if str(t.inReplyToUser.username).lower() == screen_name.lower():
                 reply_to_id = str(t.inReplyToTweetId)
 
+        # 引用RTの引用元をスナップショット保存（画像はリモートURLのまま＝容量節約）
+        quoted_json = None
+        if t.quotedTweet:
+            q = t.quotedTweet
+            try:
+                q_photos = [p.url for p in q.media.photos] if (q.media and q.media.photos) else []
+            except Exception:
+                q_photos = []
+            quoted = {
+                "tweet_id": str(q.id),
+                "screen_name": q.user.username if q.user else "",
+                "display_name": q.user.displayname if q.user else "",
+                "profile_image_url": q.user.profileImageUrl if q.user else "",
+                "content": q.rawContent or "",
+                "url": q.url,
+                "created_at": q.date.isoformat() if q.date else "",
+                "media": q_photos,
+                "like_count": q.likeCount or 0,
+                "retweet_count": q.retweetCount or 0,
+            }
+            quoted_json = json.dumps(quoted, ensure_ascii=False)
+
         cur.execute("""
         INSERT INTO tweets
         (tweet_id, screen_name, content, created_at, url,
          like_count, retweet_count, reply_count, media_json, video_json,
-         local_media_json, reply_to_tweet_id, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         local_media_json, reply_to_tweet_id, quoted_json, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tweet_id) DO UPDATE SET
             like_count=excluded.like_count,
             retweet_count=excluded.retweet_count,
             reply_count=excluded.reply_count,
-            local_media_json=excluded.local_media_json
+            local_media_json=excluded.local_media_json,
+            quoted_json=COALESCE(excluded.quoted_json, tweets.quoted_json)
         """, (
             str(t.id),
             screen_name,
@@ -345,6 +368,7 @@ def save_tweets(screen_name: str, tweets: list):
             json.dumps(video_items, ensure_ascii=False),
             json.dumps(local_paths, ensure_ascii=False),
             reply_to_id,
+            quoted_json,
             datetime.now(timezone.utc).isoformat(),
         ))
         is_new = cur.rowcount and cur.lastrowid
