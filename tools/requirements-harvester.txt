@@ -1,0 +1,4 @@
+# 手元のGUIマシンで動かす用。worker/web コンテナには入らない。
+#   pip install -r requirements-harvester.txt
+#   playwright install chromium
+playwright==1.47.0

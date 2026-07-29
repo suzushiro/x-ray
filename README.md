@@ -144,3 +144,49 @@ python route_check.py   # 全ルートを叩いてステータス＋引用カー
 
 `requirements-web.txt`（flask + waitress のみ）だけを入れた venv で実行すると、
 web が twscrape 非依存であることも同時に検証できる。
+
+## クッキー収集ツール（tools/）
+
+`F12 → ストレージ → コピー → タブ区切りで貼る` の手作業を置き換える。
+ブラウザが必要なのでコンテナには入らない（Dockerfile は `app/` のみ COPY）。
+GUI のあるマシンで動かすことを想定。
+
+### 準備
+
+```bash
+cd tools
+pip install -r requirements-harvester.txt
+playwright install chromium
+vi accounts.txt          # 1行1ユーザー名（cookies.txt のユーザー名と一致させる）
+```
+
+### 使い方
+
+```bash
+# 初回。垢ごとにブラウザが開くので手でログインする
+python cookie_harvester.py --out ../data/cookies.txt
+
+# 2周目以降。プロファイルが生きているので無操作で取り直せる
+python cookie_harvester.py --refresh --out ../data/cookies.txt
+
+# 別マシンから epi1-ubu-1 の web に直接反映
+python cookie_harvester.py --refresh --push http://epi1-ubu-1:8501
+
+# 書き込まずに状態だけ見る（期限切れ検知）
+python cookie_harvester.py --check
+
+# 切れた垢だけ入れ直す
+python cookie_harvester.py --only xconnecter03
+```
+
+ログイン操作は人間がやる（パスワードはスクリプトに渡さない）。
+垢ごとに `tools/profiles/<username>/` へセッションが永続化されるため、
+2回目以降はログイン画面が出ない。
+
+### 挙動のポイント
+
+- 一部の垢だけ取得できた場合、残りは**前回の cookies.txt の値を維持**する。
+  生きているセッションを巻き込んで消さないため。前回値が無い場合は中止（`--force` で強行）
+- `--out` 指定時は上書き前に `.bak` を作り、パーミッションを 600 にする
+- `tools/profiles/` はログインセッションの実体。`.gitignore` 済み。バックアップにも含めないこと
+- 終了コード: `0` 全垢OK / `1` 要ログインあり・POST失敗 / `2` アカウント0件 / `3` playwright 未導入
