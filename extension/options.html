@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>X-Ray Cookie Harvester 設定</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    max-width: 720px; margin: 0 auto; padding: 24px;
+    background: #15202b; color: #e7e9ea;
+    font: 14px/1.6 -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  }
+  h1 { font-size: 18px; } h2 { font-size: 15px; margin-top: 28px; }
+  label { display: block; margin: 12px 0 4px; color: #8b98a5; font-size: 12px; }
+  input[type=text] {
+    width: 100%; padding: 8px 10px; border-radius: 8px; box-sizing: border-box;
+    border: 1px solid #536471; background: #1c2732; color: #e7e9ea; font-size: 13px;
+  }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #263340; }
+  th { color: #8b98a5; font-weight: 500; font-size: 12px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+  button {
+    padding: 8px 18px; border-radius: 999px; border: 1px solid #536471;
+    background: transparent; color: #e7e9ea; cursor: pointer; font-size: 13px;
+  }
+  button.primary { background: #1d9bf0; border-color: #1d9bf0; color: #fff; font-weight: 600; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 16px; }
+  #msg { margin-left: 6px; font-size: 13px; }
+  #msg.ok { color: #00ba7c; } #msg.ng { color: #f4212e; }
+  .hint { color: #8b98a5; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>X-Ray Cookie Harvester</h1>
+
+  <h2>サーバー</h2>
+  <label for="serverUrl">X-Ray の web の URL</label>
+  <input type="text" id="serverUrl" placeholder="http://epi1-ubu-1:8501">
+  <p class="hint">送信は <code>/api/cookies/update</code> に <code>merge=1</code> 付きで POST します。
+  取得できなかった垢の行はサーバー側で維持されます。</p>
+
+  <h2>コンテナと垢の対応</h2>
+  <p class="hint">垢を割り当てたコンテナだけが収集対象になります。空欄にすると対象外。</p>
+  <div class="row">
+    <button id="autofill">コンテナ名をそのまま垢名にする</button>
+  </div>
+  <table>
+    <thead><tr><th style="width:45%">コンテナ</th><th>X のユーザー名</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="row">
+    <button id="save" class="primary">保存</button>
+    <span id="msg"></span>
+  </div>
+
+  <script src="common.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

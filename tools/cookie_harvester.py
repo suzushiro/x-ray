@@ -102,10 +102,16 @@ def merge_entries(previous, harvested):
     return merged, kept
 
 
-def push_cookies(base_url, cookies_text, timeout=20):
-    """web の /api/cookies/update に POST する。(ok, メッセージ) を返す。"""
+def push_cookies(base_url, cookies_text, timeout=20, merge=True):
+    """web の /api/cookies/update に POST する。(ok, メッセージ) を返す。
+
+    merge=True なら未取得の垢の行はサーバー側で保持される。
+    """
     url = base_url.rstrip("/") + "/api/cookies/update"
-    data = urlencode({"cookies_text": cookies_text}).encode()
+    payload = {"cookies_text": cookies_text}
+    if merge:
+        payload["merge"] = "1"
+    data = urlencode(payload).encode()
     req = Request(url, data=data, method="POST",
                   headers={"Content-Type": "application/x-www-form-urlencoded"})
     try:
@@ -254,6 +260,8 @@ def main(argv=None):
                     help="ヘッドレスで実行 (Xに弾かれやすいので非推奨)")
     ap.add_argument("--login-timeout", type=int, default=300,
                     help="手動ログインの待ち時間(秒)")
+    ap.add_argument("--no-merge", action="store_true",
+                    help="POST時にサーバー側の既存行を残さず置き換える")
     ap.add_argument("--force", action="store_true",
                     help="一部の垢が取得できなくてもそのまま反映する")
     args = ap.parse_args(argv)
@@ -346,7 +354,7 @@ def main(argv=None):
         print(f"[+] 書き出し: {out} ({len(merged)}垢)")
 
     if args.push:
-        ok, msg = push_cookies(args.push, text)
+        ok, msg = push_cookies(args.push, text, merge=not args.no_merge)
         print(f"[{'+' if ok else '!'}] POST {args.push}: {msg}")
         if not ok:
             return 1

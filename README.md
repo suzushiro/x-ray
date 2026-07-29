@@ -190,3 +190,46 @@ python cookie_harvester.py --only xconnecter03
 - `--out` 指定時は上書き前に `.bak` を作り、パーミッションを 600 にする
 - `tools/profiles/` はログインセッションの実体。`.gitignore` 済み。バックアップにも含めないこと
 - 終了コード: `0` 全垢OK / `1` 要ログインあり・POST失敗 / `2` アカウント0件 / `3` playwright 未導入
+
+## Firefox 拡張（extension/）
+
+Firefox の **コンテナ（Multi-Account Containers）** ごとに X のクッキーを集めて、
+ボタン1発で `/api/cookies/update` に送る。7垢を1ウィンドウにログインしたまま維持できるので、
+プロファイルを切り替えて回る必要がない。
+
+`auth_token` は **HttpOnly** なので `document.cookie` やブックマークレットからは読めない。
+拡張の `browser.cookies` API 経由でのみ取得できる。
+
+### 導入
+
+1. Firefox に Multi-Account Containers を入れ、垢ごとにコンテナを作る
+   （コンテナ名を X のユーザー名と同じにしておくと設定が楽）
+2. 各コンテナで x.com にログインしておく
+3. 拡張を読み込む
+   - お試し: `about:debugging#/runtime/this-firefox` →「一時的なアドオンを読み込む」→ `extension/manifest.json`
+     （**再起動で消える**）
+   - 恒久: AMO で unlisted 署名を取って `.xpi` をインストール。
+     または Developer Edition / ESR で `xpinstall.signatures.required=false`
+4. 拡張の設定を開き、サーバーURL（例 `http://epi1-ubu-1:8501`）と
+   コンテナ→ユーザー名の対応を設定する。「コンテナ名をそのまま垢名にする」で一括入力できる
+
+### 使い方
+
+ツールバーのアイコンを押すと、コンテナごとの状態（OK / 要ログイン）と
+`auth_token` の残り日数が一覧で出る。
+
+- **送信** — `merge=1` で POST。取得できなかった垢の行はサーバー側で維持される
+- **コピー** — cookies.txt 形式でクリップボードへ（手で貼りたい時用）
+- **再取得** — 読み直し
+
+トークンは拡張のストレージに保存しない。欠落検知のためにユーザー名だけ記録する。
+
+## /api/cookies/update の merge
+
+`merge=1` を付けて POST すると、送った行だけをユーザー名単位で上書きし、
+送らなかった垢の行はそのまま残す。一部の垢しか取得できなかった時に、
+生きているセッションを巻き込んで消さないため。
+
+レスポンス: `{ok, count(合計), updated(今回更新), kept(維持), merged, previous}`
+
+`merge` 無しは従来どおり全置き換え（`manage` 画面の手貼りフォームはこちら）。

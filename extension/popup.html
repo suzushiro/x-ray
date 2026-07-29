@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: dark; }
+  body {
+    width: 420px; margin: 0; padding: 14px;
+    background: #15202b; color: #e7e9ea;
+    font: 13px/1.5 -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  }
+  h1 { font-size: 14px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h1 .sub { margin-left: auto; font-weight: 400; font-size: 11px; color: #8b98a5; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid #263340; }
+  th { color: #8b98a5; font-weight: 500; font-size: 11px; }
+  td.user { font-family: ui-monospace, monospace; font-size: 12px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .ok { color: #00ba7c; } .ng { color: #f4212e; } .muted { color: #8b98a5; }
+  .note { font-size: 11px; color: #8b98a5; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; }
+  button {
+    flex: 1; padding: 8px; border-radius: 999px; border: 1px solid #536471;
+    background: transparent; color: #e7e9ea; cursor: pointer; font-size: 13px;
+  }
+  button.primary { background: #1d9bf0; border-color: #1d9bf0; color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #msg { margin-top: 10px; font-size: 12px; min-height: 1.4em; }
+  #msg.ok { color: #00ba7c; } #msg.ng { color: #f4212e; }
+  #warn {
+    margin-top: 10px; padding: 8px; border-radius: 8px; font-size: 12px;
+    background: #3a2a12; border: 1px solid #6b4b16; color: #ffd08a; display: none;
+  }
+  a { color: #1d9bf0; }
+  .empty { padding: 16px 4px; color: #8b98a5; }
+</style>
+</head>
+<body>
+  <h1>X-Ray Cookie Harvester <span class="sub" id="server"></span></h1>
+
+  <div id="body"><div class="empty">読み込み中…</div></div>
+
+  <div id="warn"></div>
+
+  <div class="actions">
+    <button id="recheck">再取得</button>
+    <button id="copy">コピー</button>
+    <button id="push" class="primary">送信</button>
+  </div>
+
+  <div id="msg"></div>
+  <div class="note" style="margin-top:8px">
+    <a href="#" id="opts">設定（コンテナと垢の対応・サーバーURL）</a>
+  </div>
+
+  <script src="common.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

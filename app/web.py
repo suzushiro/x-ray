@@ -395,12 +395,56 @@ def api_cookies_update():
     if not valid_lines:
         return jsonify({"ok": False, "error": "有効なクッキー行がありません（形式: username[TAB]auth_token=...; ct0=...）"}), 400
 
-    with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-        f.write("# username\tauth_token=xxxx; ct0=yyyy\n")
-        for line in valid_lines:
-            f.write(line + "\n")
+    # merge=1 なら既存行を保持したままユーザー名単位で上書きする。
+    # 一部の垢しか取得できなかった時に、生きている残りの垢を巻き込んで消さないため。
+    merge = (request.form.get("merge") or "").strip().lower() in ("1", "true", "on", "yes")
 
-    return jsonify({"ok": True, "count": len(valid_lines)})
+    entries = {}   # username -> 行
+    order = []     # 既存の並びを保つ
+    if merge and os.path.exists(COOKIES_FILE):
+        try:
+            with open(COOKIES_FILE, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "\t" not in line:
+                        continue
+                    username = line.split("\t", 1)[0].strip()
+                    if username and username not in entries:
+                        order.append(username)
+                    entries[username] = line
+        except OSError:
+            pass
+
+    kept_before = len(entries)
+    updated = 0
+    for line in valid_lines:
+        username = line.split("\t", 1)[0].strip()
+        if not username:
+            continue
+        if username not in entries:
+            order.append(username)
+        entries[username] = line
+        updated += 1
+
+    tmp = COOKIES_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("# username\tauth_token=xxxx; ct0=yyyy\n")
+        for username in order:
+            f.write(entries[username] + "\n")
+    os.replace(tmp, COOKIES_FILE)
+    try:
+        os.chmod(COOKIES_FILE, 0o600)
+    except OSError:
+        pass
+
+    return jsonify({
+        "ok": True,
+        "count": len(entries),      # ファイル内の総数
+        "updated": updated,         # 今回書き換えた数
+        "kept": max(0, len(entries) - updated),
+        "merged": merge,
+        "previous": kept_before,
+    })
 
 
 @app.route("/api/bookmark/toggle", methods=["POST"])

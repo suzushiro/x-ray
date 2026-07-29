@@ -1,0 +1,45 @@
+{
+  "manifest_version": 2,
+  "name": "X-Ray Cookie Harvester",
+  "version": "1.0.0",
+  "description": "Firefox のコンテナごとに X の auth_token / ct0 を集めて X-Ray に送る",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "x-ray-cookie-harvester@suzushiro",
+      "strict_min_version": "115.0"
+    }
+  },
+
+  "permissions": [
+    "cookies",
+    "contextualIdentities",
+    "storage",
+    "https://x.com/*",
+    "https://twitter.com/*"
+  ],
+
+  "optional_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+
+  "browser_action": {
+    "default_title": "X-Ray Cookie Harvester",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icons/icon.svg",
+      "96": "icons/icon.svg"
+    }
+  },
+
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}
