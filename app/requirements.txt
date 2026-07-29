@@ -1,3 +1,5 @@
 flask==3.0.3
 waitress==3.0.0
-twscrape[curl]==0.19.1
+# 0.19.2 で issue #320 (Couldn't get XClientTxId indices script) が修正済み。
+# これ以前はフォーク指定が必要だった。
+twscrape[curl]>=0.19.2

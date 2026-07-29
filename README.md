@@ -232,4 +232,20 @@ Firefox の **コンテナ（Multi-Account Containers）** ごとに X のクッ
 
 レスポンス: `{ok, count(合計), updated(今回更新), kept(維持), merged, previous}`
 
-`merge` 無しは従来どおり全置き換え（`manage` 画面の手貼りフォームはこちら）。
+`merge` 無しは従来どおり全置き換え。`manage` 画面のフォームにはチェックボックスがあり、
+既定は merge（貼った垢だけ更新）。外すと全置き換えになり、確認ダイアログが出る。
+
+## twscrape のバージョン
+
+issue #320（`Couldn't get XClientTxId indices script` / `XClIdGen` エラー）は
+**0.19.2 で修正済み**。フォーク指定は不要になったので `twscrape[curl]>=0.19.2` に戻し、
+`Dockerfile.worker` から `git` も外した。
+
+手元の `requirements.txt` がまだ `git+https://github.com/jonsuh/twscrape.git@...` を
+指している場合は、この版で上書きしてから worker を再ビルドすること:
+
+```bash
+docker compose build worker --no-cache
+docker compose up -d worker
+docker exec -it x-ray-worker python scraper.py add-cookies
+```

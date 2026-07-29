@@ -116,6 +116,47 @@ check("merge=true も効く", res.get("merged") is True and len(read_users()) ==
 st, res = post(line("u1", "v4"), merge="0")
 check("merge=0 は置き換え", len(read_users()) == 1, f"{len(read_users())}垢")
 
+print("\n== multipart/form-data（manage 画面の FormData 相当）==")
+import io as _io
+import uuid as _uuid
+
+
+def post_multipart(text, merge=None):
+    boundary = "----x" + _uuid.uuid4().hex
+    parts = [("cookies_text", text)]
+    if merge is not None:
+        parts.append(("merge", merge))
+    buf = _io.BytesIO()
+    for name, val in parts:
+        buf.write(f"--{boundary}\r\n".encode())
+        buf.write(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        buf.write(str(val).encode() + b"\r\n")
+    buf.write(f"--{boundary}--\r\n".encode())
+    req = Request("http://127.0.0.1:5198/api/cookies/update", data=buf.getvalue(),
+                  method="POST",
+                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    import json as _json
+    try:
+        with urlopen(req, timeout=10) as r:
+            return r.status, _json.load(r)
+    except Exception as e:
+        return getattr(e, "code", 0), (e.read().decode() if hasattr(e, "read") else str(e))
+
+
+post("\n".join(line(f"m{i}", f"a{i}") for i in range(1, 8)))
+check("multipart で7垢投入", len(read_users()) == 7, f"{len(read_users())}垢")
+
+st, res = post_multipart(line("m2", "NEW2"), merge="1")
+users = read_users()
+check("multipart + merge=1 で200", st == 200, str(res))
+check("7垢維持される", len(users) == 7, f"{len(users)}垢")
+check("対象垢だけ更新", users["m2"] == "auth_token=NEW2; ct0=NEW2", users.get("m2", ""))
+check("他は据え置き", users["m5"] == "auth_token=a5; ct0=a5", users.get("m5", ""))
+check("kept を返す", res.get("kept") == 6, str(res))
+
+st, res = post_multipart(line("m2", "NEW2b"))
+check("multipart で merge 無しは全置き換え", len(read_users()) == 1, f"{len(read_users())}垢")
+
 print("\n== パーミッション ==")
 mode = oct(COOKIES.stat().st_mode)[-3:]
 check("cookies.txt は 600", mode == "600", mode)

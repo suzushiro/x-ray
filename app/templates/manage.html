@@ -118,11 +118,16 @@ textarea { resize: vertical; min-height: 120px; font-family: monospace; font-siz
         <h2>🍪 クッキー更新 <span style="font-size:12px;color:var(--text-dim);font-weight:normal">（現在 {{ cookie_count }} 垢登録済み）</span></h2>
         <label>クッキー情報（1行1アカウント、タブ区切り）</label>
         <textarea id="cookies-text" placeholder="username1&#9;auth_token=xxxx; ct0=yyyy&#10;username2&#9;auth_token=xxxx; ct0=yyyy"></textarea>
+        <label style="display:flex;align-items:center;gap:8px;font-weight:normal;cursor:pointer">
+            <input type="checkbox" id="cookies-merge" checked style="width:auto;margin:0">
+            <span>貼った垢だけ更新する（貼らなかった垢はそのまま残す）</span>
+        </label>
         <button class="btn" onclick="updateCookies()">クッキーを保存</button>
         <div class="msg" id="cookies-msg"></div>
         <div class="hint">
             取得方法: ブラウザのプライベートウィンドウでXにログイン → F12 → ストレージ/Application → Cookie → x.com<br>
             <code>auth_token</code> と <code>ct0</code> の値をコピーして上記形式で貼り付け。<br>
+            チェックを<strong>外す</strong>と貼った内容で全置き換えになり、貼らなかった垢の行は消えます。<br>
             保存後、サーバーで <code>docker exec -it x-ray-worker python scraper.py add-cookies</code> を実行してください。
         </div>
     </div>
@@ -208,14 +213,19 @@ async function updateCookies() {
         msg.className = 'msg err'; msg.textContent = 'クッキー情報が空です';
         return;
     }
+    const merge = document.getElementById('cookies-merge').checked;
+    if (!merge && !confirm('全置き換えします。貼っていない垢の行は消えますがよろしいですか？')) return;
+
     const fd = new FormData();
     fd.set('cookies_text', text);
+    if (merge) fd.set('merge', '1');
     try {
         const res = await fetch('/api/cookies/update', { method: 'POST', body: fd });
         const data = await res.json();
         if (data.ok) {
             msg.className = 'msg ok';
-            msg.textContent = `${data.count}垢分のクッキーを保存しました。サーバーで add-cookies を実行してください。`;
+            const kept = data.kept ? `（更新 ${data.updated}垢 / 維持 ${data.kept}垢）` : '';
+            msg.textContent = `${data.count}垢分のクッキーを保存しました${kept}。サーバーで add-cookies を実行してください。`;
         } else {
             msg.className = 'msg err'; msg.textContent = data.error;
         }
