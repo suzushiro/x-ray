@@ -25,6 +25,7 @@ from cache_utils import (
     IMAGES_DIR,
     PERSIST_CATEGORIES,
     file_sha256,
+    is_deleted,
     link_or_copy,
     should_persist,
 )
@@ -307,6 +308,10 @@ def save_tweets(screen_name: str, tweets: list):
         # 永続カテゴリなら /data/images、それ以外は /data/cache
         local_paths = []
         for i, purl in enumerate(photo_urls):
+            # 手動削除済みの画像は再取得しない（墓標が残っている限り永久に）
+            if is_deleted(conn, purl):
+                local_paths.append(None)
+                continue
             lp = download_image(purl, screen_name, str(t.id), i + 1,
                                 persist=persist, conn=conn)
             local_paths.append(lp)  # 失敗時はNoneが入る

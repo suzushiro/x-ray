@@ -146,6 +146,18 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_media_index_sha ON media_index(sha256)
     """)
 
+    # 手動で削除した画像の墓標。remote_url をキーにすることで
+    # tweets / bookmarks の両方、および再スクレイプ時の再DLを一括で抑止する。
+    # ここに行があれば「その画像は二度と表示も取得もしない」。
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS deleted_media (
+        remote_url  TEXT PRIMARY KEY,
+        tweet_id    TEXT,
+        screen_name TEXT,
+        deleted_at  TEXT
+    )
+    """)
+
     # scrape_log は 15分 x アカウント数 で急速に増える。
     # トップページが run_at で絞り込むためインデックス必須。
     cur.execute("""

@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import time
+from datetime import datetime, timezone
 
 from db import get_conn
 
@@ -329,3 +330,185 @@ if __name__ == "__main__":
         f"[+] キャッシュ削除: {res['deleted']}件 / {mb:.1f}MB 解放 "
         f"(保持 {res['kept']}件, DB同期 {res['synced']}行, 閾値 {res['days']}日)"
     )
+
+
+# ---------------------------------------------------------------- 手動削除
+
+def is_deleted(conn, remote_url: str) -> bool:
+    """その画像URLが手動削除済みか"""
+    if not remote_url:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM deleted_media WHERE remote_url=?", (remote_url,)
+    ).fetchone()
+    return row is not None
+
+
+def deleted_urls(conn) -> set:
+    """手動削除済みの画像URL一覧。表示側でまとめて弾くのに使う。"""
+    try:
+        return {r["remote_url"] for r in conn.execute(
+            "SELECT remote_url FROM deleted_media")}
+    except Exception:
+        return set()
+
+
+def _filename_refcount(conn, filename: str, skip_url: str) -> int:
+    """
+    そのファイル名を参照している他の画像URLの数を数える。
+
+    dedupe（ハードリンク）で複数URLが同じ実体を指しうるので、
+    参照が残っているうちは実ファイルを消してはいけない。
+    """
+    n = 0
+    try:
+        for r in conn.execute(
+                "SELECT remote_url, filename FROM media_index WHERE filename=?",
+                (filename,)):
+            if r["remote_url"] != skip_url:
+                n += 1
+    except Exception:
+        pass
+    return n
+
+
+def _paths_referencing(conn, filename: str, skip_tweet_id: str | None,
+                       skip_index: int | None) -> int:
+    """
+    tweets / bookmarks の local_media_json 内で、そのファイル名を指している
+    参照の数。media_index に載っていない古いデータの保険。
+    """
+    n = 0
+    for table in ("tweets", "bookmarks"):
+        try:
+            rows = conn.execute(
+                f"SELECT tweet_id, local_media_json FROM {table} "
+                f"WHERE local_media_json LIKE ?", (f"%{filename}%",)).fetchall()
+        except Exception:
+            continue
+        for r in rows:
+            try:
+                paths = json.loads(r["local_media_json"] or "[]")
+            except Exception:
+                continue
+            for i, p in enumerate(paths):
+                if not p or os.path.basename(p) != filename:
+                    continue
+                # 今まさに消そうとしている当人はカウントしない
+                if (table == "tweets" and r["tweet_id"] == skip_tweet_id
+                        and i == skip_index):
+                    continue
+                if table == "bookmarks" and r["tweet_id"] == skip_tweet_id:
+                    continue
+                n += 1
+    return n
+
+
+def delete_media(conn, tweet_id: str, index: int) -> dict:
+    """
+    ツイートの index 番目の画像を削除する。
+
+      1. 実ファイルを消す（他から参照されていない場合のみ）
+      2. deleted_media に墓標を残す（再表示・再DLの抑止）
+      3. tweets / bookmarks の local_media_json の該当箇所を None にする
+
+    戻り値: {ok, error?, remote_url?, file_removed, still_referenced}
+    """
+    row = conn.execute(
+        "SELECT tweet_id, screen_name, media_json, local_media_json "
+        "FROM tweets WHERE tweet_id=?", (tweet_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": "ツイートが見つかりません"}
+
+    try:
+        media = json.loads(row["media_json"] or "[]")
+    except Exception:
+        media = []
+    if index < 0 or index >= len(media):
+        return {"ok": False, "error": "画像インデックスが範囲外です"}
+
+    remote_url = media[index]
+    try:
+        local = json.loads(row["local_media_json"] or "[]")
+    except Exception:
+        local = []
+    local_path = local[index] if index < len(local) else None
+
+    file_removed = False
+    still_referenced = False
+
+    if local_path:
+        filename = os.path.basename(local_path)
+        refs = (_filename_refcount(conn, filename, remote_url)
+                + _paths_referencing(conn, filename, tweet_id, index))
+        if refs > 0:
+            # 他のポストが同じ実体を参照している → ファイルは残す
+            still_referenced = True
+        else:
+            for d in (IMAGES_DIR, CACHE_DIR):
+                fp = os.path.join(d, filename)
+                try:
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                        file_removed = True
+                except OSError as e:
+                    print(f"[!] 画像削除失敗 {fp}: {e}")
+
+    # 墓標。これが再表示と再DLの両方を止める
+    conn.execute(
+        "INSERT OR REPLACE INTO deleted_media (remote_url, tweet_id, screen_name, deleted_at)"
+        " VALUES (?,?,?,?)",
+        (remote_url, tweet_id, row["screen_name"],
+         datetime.now(timezone.utc).isoformat()))
+
+    # media_index からも外す（次回DL時に参照されないように）
+    try:
+        conn.execute("DELETE FROM media_index WHERE remote_url=?", (remote_url,))
+    except Exception:
+        pass
+
+    _null_local_path(conn, "tweets", tweet_id, index)
+    _null_local_path(conn, "bookmarks", tweet_id, index)
+
+    conn.commit()
+    return {"ok": True, "remote_url": remote_url,
+            "file_removed": file_removed, "still_referenced": still_referenced}
+
+
+def _null_local_path(conn, table: str, tweet_id: str, index: int) -> None:
+    """local_media_json の index 番目を None にする"""
+    try:
+        row = conn.execute(
+            f"SELECT local_media_json FROM {table} WHERE tweet_id=?",
+            (tweet_id,)).fetchone()
+        if not row:
+            return
+        paths = json.loads(row["local_media_json"] or "[]")
+        if index < len(paths):
+            paths[index] = None
+            conn.execute(
+                f"UPDATE {table} SET local_media_json=? WHERE tweet_id=?",
+                (json.dumps(paths), tweet_id))
+    except Exception as e:
+        print(f"[!] {table}.local_media_json 更新失敗 {tweet_id}[{index}]: {e}")
+
+
+def delete_all_media(conn, tweet_id: str) -> dict:
+    """ツイートの画像を全部削除する"""
+    row = conn.execute(
+        "SELECT media_json FROM tweets WHERE tweet_id=?", (tweet_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": "ツイートが見つかりません"}
+    try:
+        media = json.loads(row["media_json"] or "[]")
+    except Exception:
+        media = []
+
+    deleted, removed = 0, 0
+    for i in range(len(media)):
+        r = delete_media(conn, tweet_id, i)
+        if r.get("ok"):
+            deleted += 1
+            if r.get("file_removed"):
+                removed += 1
+    return {"ok": True, "deleted": deleted, "file_removed": removed}

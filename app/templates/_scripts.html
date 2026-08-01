@@ -188,4 +188,72 @@ window.addEventListener('resize', adjustStickyTops);
         document.querySelectorAll('.infinite-sentinel').forEach(s => observer.observe(s));
     });
 })();
+
+// 画像削除。サーバー上の実ファイルも消える（復元不可）
+async function deleteImage(btn, ev) {
+    if (ev) ev.stopPropagation();   // ギャラリーではカードのクリック（拡大）を止める
+    if (!confirm('この画像を削除します。サーバー上のファイルも消え、元に戻せません。よろしいですか？')) return;
+
+    const tid = btn.dataset.tid;
+    const index = btn.dataset.mindex;
+    btn.disabled = true;
+    btn.textContent = '…';
+
+    const fd = new FormData();
+    fd.set('tweet_id', tid);
+    fd.set('index', index);
+
+    try {
+        const res = await fetch('/api/media/delete', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!data.ok) {
+            alert('削除できませんでした: ' + (data.error || '不明なエラー'));
+            btn.disabled = false; btn.textContent = '🗑';
+            return;
+        }
+        removeImageFromDom(btn);
+    } catch (e) {
+        alert('通信エラー: ' + e);
+        btn.disabled = false; btn.textContent = '🗑';
+    }
+}
+
+// 削除後の見た目をその場で更新する（リロード不要）
+function removeImageFromDom(btn) {
+    const galleryItem = btn.closest('.gallery-item');
+    if (galleryItem) { galleryItem.remove(); return; }
+
+    const cell = btn.closest('.media-cell');
+    if (!cell) return;
+    const wrap = cell.closest('.tweet-media');
+    cell.remove();
+
+    const left = wrap.querySelectorAll('.media-cell').length;
+    if (left === 0) {
+        const note = document.createElement('div');
+        note.className = 'media-deleted';
+        note.textContent = '画像を削除しました';
+        wrap.replaceWith(note);
+        return;
+    }
+    if (left === 1) { wrap.classList.remove('multi'); wrap.classList.add('single'); }
+
+    // 拡大表示用のURL配列と data-idx を振り直す
+    const imgs = [...wrap.querySelectorAll('img')];
+    imgs.forEach((img, i) => img.dataset.idx = i);
+    try {
+        wrap.dataset.imgs = btoa(unescape(encodeURIComponent(
+            JSON.stringify(imgs.map(i => i.getAttribute('src'))))));
+    } catch (e) { /* 拡大表示が古いままでも致命ではない */ }
+
+    let note = wrap.parentNode.querySelector('.media-deleted.inline');
+    if (!note) {
+        note = document.createElement('div');
+        note.className = 'media-deleted inline';
+        wrap.after(note);
+    }
+    const n = (parseInt(note.dataset.n || '0', 10) || 0) + 1;
+    note.dataset.n = n;
+    note.textContent = `画像${n}枚を削除しました`;
+}
 </script>

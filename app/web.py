@@ -109,19 +109,29 @@ def get_bookmarked_ids(conn):
         return set()
 
 
-def format_tweet(d, bookmarked_ids=None):
+def format_tweet(d, bookmarked_ids=None, deleted=None):
     """DBの行dict（tweets JOIN accounts想定）を表示用に整形する"""
     d["media"] = json.loads(d.get("media_json") or "[]")
     d["videos"] = json.loads(d.get("video_json") or "[]")
     d["local_media"] = json.loads(d.get("local_media_json") or "[]")
     d["categories_list"] = json.loads(d.get("categories") or "[]")
 
-    # 表示用画像: ローカルがあればローカル優先、なければリモートURL
+    # 表示用画像: ローカルがあればローカル優先、なければリモートURL。
+    # 手動削除済みのURLは除外し、何枚消したかを持たせる。
+    deleted = deleted or set()
     display_imgs = []
+    media_idx = []
+    deleted_count = 0
     for i, remote in enumerate(d["media"]):
+        if remote in deleted:
+            deleted_count += 1
+            continue
         local = d["local_media"][i] if i < len(d["local_media"]) else None
         display_imgs.append(local if local else remote)
+        media_idx.append(i)     # 削除ボタンが送る元インデックス
     d["display_imgs"] = display_imgs
+    d["media_idx"] = media_idx
+    d["deleted_count"] = deleted_count
 
     d["media_b64"] = base64.b64encode(
         json.dumps(display_imgs).encode()
@@ -188,6 +198,7 @@ def index():
 
     conn = db()
     bookmarked_ids = get_bookmarked_ids(conn)
+    deleted_media = cache_utils.deleted_urls(conn)
 
     if category == "all":
         rows = conn.execute("""
@@ -212,7 +223,7 @@ def index():
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
 
-    tweets = [format_tweet(dict(r), bookmarked_ids) for r in rows]
+    tweets = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
 
     # 各カテゴリの件数（タブのバッジ用）
     categories_list = get_categories()
@@ -254,7 +265,7 @@ def index():
     """).fetchall()
 
 
-    tweets = [format_tweet(dict(r), bookmarked_ids) for r in rows]
+    tweets = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
 
     # 自己リプライをグルーピング
     tweet_map = {t["tweet_id"]: t for t in tweets}
@@ -507,6 +518,40 @@ def api_bookmark_toggle():
     return jsonify({"ok": True, "bookmarked": True, "promoted": promoted})
 
 
+@app.route("/api/media/delete", methods=["POST"])
+def api_media_delete():
+    """
+    画像を削除する。サーバー上の実ファイルも消える（復元不可）。
+
+    tweet_id + index  → その1枚
+    tweet_id + all=1  → そのポストの画像を全部
+    """
+    tweet_id = (request.form.get("tweet_id") or "").strip()
+    if not tweet_id:
+        return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
+
+    conn = db()
+    delete_all = (request.form.get("all") or "").strip().lower() in ("1", "true", "on", "yes")
+
+    if delete_all:
+        res = cache_utils.delete_all_media(conn, tweet_id)
+        if not res.get("ok"):
+            return jsonify(res), 404
+        return jsonify(res)
+
+    raw = (request.form.get("index") or "").strip()
+    try:
+        index = int(raw)
+    except ValueError:
+        return jsonify({"ok": False, "error": "indexが不正です"}), 400
+
+    res = cache_utils.delete_media(conn, tweet_id, index)
+    if not res.get("ok"):
+        code = 404 if "見つかりません" in res.get("error", "") else 400
+        return jsonify(res), code
+    return jsonify(res)
+
+
 @app.route("/bookmarks")
 def bookmarks():
     conn = db()
@@ -514,6 +559,7 @@ def bookmarks():
         SELECT * FROM bookmarks ORDER BY bookmarked_at DESC
     """).fetchall()
 
+    deleted = cache_utils.deleted_urls(conn)
     tweets = []
     for r in rows:
         d = dict(r)
@@ -522,10 +568,18 @@ def bookmarks():
         d["local_media"] = json.loads(d.get("local_media_json") or "[]")
         d["categories_list"] = json.loads(d.get("categories") or "[]")
         display_imgs = []
+        media_idx = []
+        deleted_count = 0
         for i, remote in enumerate(d["media"]):
+            if remote in deleted:
+                deleted_count += 1
+                continue
             local = d["local_media"][i] if i < len(d["local_media"]) else None
             display_imgs.append(local if local else remote)
+            media_idx.append(i)
         d["display_imgs"] = display_imgs
+        d["media_idx"] = media_idx
+        d["deleted_count"] = deleted_count
         d["media_b64"] = base64.b64encode(json.dumps(display_imgs).encode()).decode() if display_imgs else ""
         try:
             dt_jst = datetime.fromisoformat(d["created_at"].replace("Z", "+00:00")).astimezone(JST)
@@ -575,14 +629,18 @@ def gallery():
     rows = rows[:PER_PAGE]
 
     # 画像を平坦化（1画像=1グリッドアイテム）
+    deleted = cache_utils.deleted_urls(conn)
     gallery_items = []
     for r in rows:
         d = dict(r)
         media = json.loads(d.get("media_json") or "[]")
         local = json.loads(d.get("local_media_json") or "[]")
         for i, remote in enumerate(media):
+            if remote in deleted:
+                continue
             lp = local[i] if i < len(local) else None
             gallery_items.append({
+                "media_index": i,
                 "img": lp if lp else remote,
                 "screen_name": d["screen_name"],
                 "display_name": d["display_name"],
@@ -618,6 +676,7 @@ def search():
     if q:
         conn = db()
         bookmarked_ids = get_bookmarked_ids(conn)
+        deleted_media = cache_utils.deleted_urls(conn)
         try:
             # FTS5で検索
             rows = conn.execute("""
@@ -637,7 +696,7 @@ def search():
                 WHERE t.content LIKE ?
                 ORDER BY t.created_at DESC LIMIT 200
             """, (f"%{q}%",)).fetchall()
-        results = [format_tweet(dict(r), bookmarked_ids) for r in rows]
+        results = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
 
     return render_template("search.html", results=results, query=q, categories=get_categories())
 
@@ -651,6 +710,7 @@ def user_profile(screen_name):
 
     conn = db()
     bookmarked_ids = get_bookmarked_ids(conn)
+    deleted_media = cache_utils.deleted_urls(conn)
 
     acc = conn.execute(
         "SELECT * FROM accounts WHERE screen_name = ?", (screen_name,)
@@ -712,7 +772,7 @@ def user_profile(screen_name):
 
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
-    tweets = [format_tweet(dict(r), bookmarked_ids) for r in rows]
+    tweets = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
 
     next_url = (
         url_for("user_profile", screen_name=screen_name, page=page + 1,

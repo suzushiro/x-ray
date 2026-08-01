@@ -249,3 +249,28 @@ docker compose build worker --no-cache
 docker compose up -d worker
 docker exec -it x-ray-worker python scraper.py add-cookies
 ```
+
+## 画像削除
+
+投稿の画像にホバーすると出る 🗑 ボタン、またはギャラリーの各画像から削除できる。
+**サーバー上の実ファイルも消える。復元不可。**
+
+削除すると:
+
+- 実ファイル（`/data/images` と `/data/cache`）を削除
+- `deleted_media` テーブルに墓標を残す
+- `tweets` / `bookmarks` の `local_media_json` の該当箇所を `None` にする
+- 元の投稿には「画像N枚を削除しました」と表示される
+- ギャラリーからも消える
+- **次回スクレイプで再ダウンロードされない**（墓標が残る限り永久に）
+
+### 設計上の注意
+
+- 墓標のキーは **画像のリモートURL**。これによりブックマーク側、同じ画像を含む
+  別の投稿、再スクレイプのすべてに一括で効く。
+  `local_media_json` を `None` にするだけでは表示がリモートURLへフォールバックして
+  画像が戻ってしまうため、墓標が必須
+- dedupe でハードリンク共有されているファイルは、**他からの参照が残っている間は
+  実ファイルを消さない**（`still_referenced` で返る）。最後の参照が消えた時に削除される
+- API: `POST /api/media/delete` に `tweet_id` + `index`（1枚）または
+  `tweet_id` + `all=1`（投稿の画像全部）

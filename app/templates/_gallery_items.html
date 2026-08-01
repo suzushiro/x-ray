@@ -5,6 +5,9 @@
      data-dt="{{ it.created_at[:10] }}" onclick="imgClick(this)">
     <img src="{{ it.img }}" loading="lazy" alt="">
     <div class="gi-overlay">@{{ it.screen_name }}</div>
+    <button class="img-del" title="この画像を削除" aria-label="この画像を削除"
+            data-tid="{{ it.tweet_id }}" data-mindex="{{ it.media_index }}"
+            onclick="deleteImage(this, event)">🗑</button>
 </div>
 {% endfor %}
 {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}
