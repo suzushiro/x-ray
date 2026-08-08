@@ -14,7 +14,7 @@ import shutil
 import sys
 import hashlib
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from twscrape import API, gather
 from twscrape.logger import set_log_level
@@ -403,6 +403,37 @@ def log_result(screen_name, status, message="", new_tweets=0):
     """, (datetime.now(timezone.utc).isoformat(), screen_name, status, message, new_tweets))
     conn.commit()
     conn.close()
+
+
+SCRAPE_LOG_RETENTION_DAYS = int(os.environ.get("SCRAPE_LOG_RETENTION_DAYS", "7") or 7)
+
+
+def prune_scrape_log(days: int | None = None) -> int:
+    """
+    古いスクレイプログを削除する。
+
+    scrape_log は「15分 x アカウント数」で増えるため放置すると肥大化する。
+    （85垢なら1日あたり約8000行）
+    戻り値: 削除した行数。
+    """
+    days = SCRAPE_LOG_RETENTION_DAYS if days is None else days
+    if days <= 0:
+        return 0     # 0以下なら保持期限なし＝削除しない
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM scrape_log WHERE run_at < ?", (cutoff,))
+        n = cur.rowcount or 0
+        conn.commit()
+        if n:
+            print(f"[*] スクレイプログを{n}件削除（{days}日より古いもの）")
+        return n
+    except Exception as e:
+        print(f"[!] スクレイプログの削除に失敗: {e}")
+        return 0
+    finally:
+        conn.close()
 
 
 def get_all_screen_names():
