@@ -4,7 +4,7 @@
 const X_ORIGINS = ["https://x.com/", "https://twitter.com/"];
 
 const DEFAULTS = {
-  serverUrl: "http://epi1-ubu-1:8501",
+  serverUrl: "",
   mapping: {},        // cookieStoreId -> username
   lastPushed: null,   // { usernames: [...], at: ISO文字列 } ※トークンは保存しない
 };

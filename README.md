@@ -157,7 +157,7 @@ GUI のあるマシンで動かすことを想定。
 cd tools
 pip install -r requirements-harvester.txt
 playwright install chromium
-vi accounts.txt          # 1行1ユーザー名（cookies.txt のユーザー名と一致させる）
+cp accounts.example.txt accounts.txt && vi accounts.txt          # 1行1ユーザー名（cookies.txt のユーザー名と一致させる）
 ```
 
 ### 使い方
@@ -169,8 +169,8 @@ python cookie_harvester.py --out ../data/cookies.txt
 # 2周目以降。プロファイルが生きているので無操作で取り直せる
 python cookie_harvester.py --refresh --out ../data/cookies.txt
 
-# 別マシンから epi1-ubu-1 の web に直接反映
-python cookie_harvester.py --refresh --push http://epi1-ubu-1:8501
+# 別マシンから <host> の web に直接反映
+python cookie_harvester.py --refresh --push http://<host>:8501
 
 # 書き込まずに状態だけ見る（期限切れ検知）
 python cookie_harvester.py --check
@@ -210,7 +210,7 @@ Firefox の **コンテナ（Multi-Account Containers）** ごとに X のクッ
      （**再起動で消える**）
    - 恒久: AMO で unlisted 署名を取って `.xpi` をインストール。
      または Developer Edition / ESR で `xpinstall.signatures.required=false`
-4. 拡張の設定を開き、サーバーURL（例 `http://epi1-ubu-1:8501`）と
+4. 拡張の設定を開き、サーバーURL（例 `http://<host>:8501`）と
    コンテナ→ユーザー名の対応を設定する。「コンテナ名をそのまま垢名にする」で一括入力できる
 
 ### 使い方
@@ -274,3 +274,67 @@ docker exec -it x-ray-worker python scraper.py add-cookies
   実ファイルを消さない**（`still_referenced` で返る）。最後の参照が消えた時に削除される
 - API: `POST /api/media/delete` に `tweet_id` + `index`（1枚）または
   `tweet_id` + `all=1`（投稿の画像全部）
+
+## スクレイピング出口の分離（専用回線）
+
+IPレピュテーションが落ちた時にメイン回線を巻き込まないよう、スクレイピングの出口を
+別回線に分離できる。使わない場合は `PROXY_URL` を空にしておけば素通しになる。
+
+### 構成の例（Proxmox）
+
+- サブ回線をUSB LANアダプタで接続し、ブリッジ（例 `vmbr1`）を作成
+- 軽量プロキシ用のLXCを1台立てる（Alpine / 1コア・256MB で足りる）
+  - eth0: 内部LAN側（プロキシの入口）
+  - eth1: サブ回線側（実際の出口）
+  - tinyproxy を内部LAN側でListenさせ、LAN内からのみ Allow
+- デフォルトルートをサブ回線側に固定し、**コンテナ内のIPv6を無効化する**
+  （有効だとIPv6経路でメイン回線から出てしまい分離が崩れる）
+
+### X-Ray側
+
+`.env` に設定する。実際のIPアドレスはここにだけ書き、リポジトリには含めない。
+
+```
+PROXY_URL=http://<プロキシのLAN側IP>:8888
+EXPECTED_EGRESS_IP=<サブ回線のグローバルIP>
+```
+
+worker にのみproxy環境変数が渡る（web はスクレイピングしないため不要）。
+大文字・小文字の両方と、twscrape専用の `TWS_PROXY` を設定している。
+
+### 出口の確認
+
+```bash
+docker compose exec worker curl -s https://ifconfig.me     # 想定IPが返ればOK
+docker compose exec worker python scraper.py check-egress  # 想定IPと自動照合
+```
+
+`EXPECTED_EGRESS_IP` を設定していると、**スクレイプ開始前に自動で出口を照合し、
+想定と違えば中止する**。設定漏れやIPv6漏れで気づかずメイン回線から出続けるのを防ぐため。
+無効化するには空にする。
+
+### 注意点
+
+- DockerホストがIPv6グローバルを持つ場合、環境変数を入れ忘れたコンテナはIPv6で
+  メイン回線から出る。**設定漏れが分離の抜け穴になる**
+- curl-cffi（twscrape）も urllib（画像DL）も標準のproxy環境変数を尊重することは実測済み
+  （大文字・小文字の両方、`NO_PROXY` の除外も動作確認）
+- サブ回線が遅い場合、スループットがボトルネックになりうる
+- グローバルIPが変わったら `.env` の `EXPECTED_EGRESS_IP` を更新する
+
+## 設定と秘密情報
+
+環境ごとの値は `.env` に置く。`docker compose` が自動で読み込む。
+
+```bash
+cp .env.example .env
+vi .env
+```
+
+リポジトリに含めないもの（`.gitignore` 済み）:
+
+- `data/` — **クッキー（生きたセッショントークン）**・DB・保存画像
+- `.env` — IPアドレスなど環境固有の値
+- `tools/profiles/` — ブラウザのログインセッション
+
+`docker-compose.yml` には実IPを書かず、`${PROXY_URL}` のように `.env` を参照させること。

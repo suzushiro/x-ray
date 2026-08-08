@@ -1,0 +1,4 @@
+# このファイルを accounts.txt にコピーして編集する（accounts.txt は .gitignore 済み）。
+# 1行1ユーザー名。cookies.txt のユーザー名と一致させること。
+your_account_01
+your_account_02

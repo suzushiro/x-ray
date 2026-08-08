@@ -1,8 +1,10 @@
+# 環境ごとの値は .env に置く（.env.example をコピーして作る）。
+# ここには実際のIPアドレス等をハードコードしないこと。
 x-image-env: &image-env
   IMAGES_DIR: /data/images          # 永続保存（削除しない）
   CACHE_DIR: /data/cache            # 表示用キャッシュ（自動/手動削除）
-  PERSIST_CATEGORIES: "ギャル,illustrator,photographer,gadget"  # 永続対象カテゴリ（カンマ区切り）
-  CACHE_RETENTION_DAYS: "30"        # キャッシュ自動削除の閾値（日）
+  PERSIST_CATEGORIES: "${PERSIST_CATEGORIES:-}"      # 永続対象カテゴリ（カンマ区切り）
+  CACHE_RETENTION_DAYS: "${CACHE_RETENTION_DAYS:-30}"  # キャッシュ自動削除の閾値（日）
 
 services:
   worker:
@@ -21,9 +23,21 @@ services:
       ACCOUNTS_JSON_PATH: /data/accounts.json
       TWSCRAPE_DB: /data/accounts_pool.db   # twscrapeのXアカウントプール（再ビルドで消えないよう永続化）
       SAVE_IMAGES: "1"
-      TWEETS_PER_USER: "10"
-      SCRAPE_LOG_RETENTION_DAYS: "7"   # スクレイプログの保持日数
+      TWEETS_PER_USER: "${TWEETS_PER_USER:-10}"
+      SCRAPE_LOG_RETENTION_DAYS: "${SCRAPE_LOG_RETENTION_DAYS:-7}"
       TWS_HTTP_BACKEND: curl
+
+      # --- スクレイピングの出口を専用回線に分離する場合 ---
+      # PROXY_URL が空なら素通し。curl-cffi（twscrape）も urllib（画像DL）も
+      # 標準のproxy環境変数を尊重する。大文字・小文字の両方を入れておく。
+      HTTP_PROXY: "${PROXY_URL:-}"
+      HTTPS_PROXY: "${PROXY_URL:-}"
+      http_proxy: "${PROXY_URL:-}"
+      https_proxy: "${PROXY_URL:-}"
+      NO_PROXY: localhost,127.0.0.1
+      no_proxy: localhost,127.0.0.1
+      TWS_PROXY: "${PROXY_URL:-}"           # twscrape専用。環境変数が効かない場合の保険
+      EXPECTED_EGRESS_IP: "${EXPECTED_EGRESS_IP:-}"  # 出口IPの自動照合（空なら照合しない）
 
   web:
     build:
@@ -32,7 +46,7 @@ services:
     container_name: x-ray-web
     restart: unless-stopped
     ports:
-      - "8501:5000"
+      - "${WEB_PORT:-8501}:5000"
     volumes:
       - ./data:/data
     environment:
@@ -40,5 +54,6 @@ services:
       DB_PATH: /data/data.db
       TWITTER_COOKIES_FILE: /data/cookies.txt
       ACCOUNTS_JSON_PATH: /data/accounts.json
+    # web はスクレイピングしないのでproxyは設定しない
     depends_on:
       - worker

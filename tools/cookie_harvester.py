@@ -9,7 +9,7 @@ F12 → ストレージ → コピー → タブ区切りで貼る、の手作�
     python cookie_harvester.py --out ../data/cookies.txt
 
     # 2周目以降。プロファイルが生きているので無操作で取り直せる
-    python cookie_harvester.py --refresh --push http://epi1-ubu-1:8501
+    python cookie_harvester.py --refresh --push http://example-host:8501
 
     # 書き込まずに状態だけ見る（期限切れ検知）
     python cookie_harvester.py --check
@@ -249,7 +249,7 @@ def main(argv=None):
                     help="プロファイル置き場 (既定: tools/profiles)")
     ap.add_argument("--out", help="書き出す cookies.txt のパス")
     ap.add_argument("--push", metavar="BASE_URL",
-                    help="web の /api/cookies/update に POST (例: http://epi1-ubu-1:8501)")
+                    help="web の /api/cookies/update に POST (例: http://<host>:8501)")
     ap.add_argument("--refresh", action="store_true",
                     help="無操作モード。ログインが必要な垢はスキップして報告のみ")
     ap.add_argument("--check", action="store_true",

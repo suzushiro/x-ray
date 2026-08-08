@@ -458,6 +458,54 @@ async def scrape_all():
     print("[*] 全件取得完了")
 
 
+EXPECTED_EGRESS_IP = os.environ.get("EXPECTED_EGRESS_IP", "").strip()
+
+
+def check_egress(verbose: bool = True) -> dict:
+    """
+    実際の出口グローバルIPを調べ、EXPECTED_EGRESS_IP と照合する。
+
+    proxy環境変数の設定漏れは分離の抜け穴になる（Dockerホストが
+    IPv6グローバルを持つため、素通しだとau側から出てしまう）。
+    スクレイプ前に毎回これを通し、想定外の出口なら中断する。
+
+    戻り値: {ok, ip, expected, proxy, error?}
+    """
+    proxy = (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or "")
+    result = {"ok": False, "ip": None, "expected": EXPECTED_EGRESS_IP, "proxy": proxy}
+
+    # IPv4を強制して問い合わせる。IPv6で抜けている場合を検出するため。
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                result["ip"] = r.read().decode("utf-8", "replace").strip()
+                break
+        except Exception as e:
+            result["error"] = f"{type(e).__name__}: {e}"
+
+    if not result["ip"]:
+        if verbose:
+            print(f"[!] 出口IPを取得できませんでした: {result.get('error', '')}")
+        return result
+
+    if not EXPECTED_EGRESS_IP:
+        result["ok"] = True
+        if verbose:
+            print(f"[*] 出口IP: {result['ip']}（EXPECTED_EGRESS_IP 未設定のため照合なし）")
+        return result
+
+    result["ok"] = result["ip"] == EXPECTED_EGRESS_IP
+    if verbose:
+        if result["ok"]:
+            print(f"[+] 出口IP: {result['ip']}（想定どおり / proxy={proxy or 'なし'}）")
+        else:
+            print(f"[!] 出口IPが想定と違います: {result['ip']} "
+                  f"(想定 {EXPECTED_EGRESS_IP} / proxy={proxy or 'なし'})")
+            print("[!] proxy環境変数の設定漏れ、またはIPv6経由で抜けている可能性があります。")
+    return result
+
+
 async def main():
     init_db()
     api = API(TWSCRAPE_DB)
@@ -470,10 +518,22 @@ async def main():
         await add_accounts_via_cookies(api)
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "check-egress":
+        res = check_egress()
+        sys.exit(0 if res["ok"] else 1)
+
     if len(sys.argv) > 1 and sys.argv[1] == "relogin":
         await api.pool.login_all()
         print("[+] 再ログイン完了")
         return
+
+    # 出口の確認。想定と違えばスクレイプしない（分離が崩れた状態で走らせない）
+    if EXPECTED_EGRESS_IP:
+        eg = check_egress()
+        if not eg["ok"]:
+            print("[!] 出口IPが想定と異なるためスクレイプを中止します。")
+            print("[!] 意図的に無効化する場合は EXPECTED_EGRESS_IP を空にしてください。")
+            sys.exit(1)
 
     await scrape_all()
 

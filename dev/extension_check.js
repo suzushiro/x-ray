@@ -132,14 +132,15 @@ vm.runInContext(src, ctx);
 
   console.log("\n== 設定の保存と読み出し ==");
   const d = await ctx.loadSettings();
-  check("既定値が入る", d.serverUrl.length > 0 && typeof d.mapping === "object");
+  check("既定のサーバーURLは空（環境依存の値を同梱しない）", d.serverUrl === "", JSON.stringify(d.serverUrl));
+  check("mapping の器がある", typeof d.mapping === "object");
   await ctx.saveSettings({ serverUrl: "http://example:1234", mapping: { a: "b" } });
   const s2 = await ctx.loadSettings();
   check("保存が効く", s2.serverUrl === "http://example:1234" && s2.mapping.a === "b");
 
   console.log("\n== host permission 要求 ==");
-  const perm = await ctx.ensureHostPermission("http://epi1-ubu-1:8501");
-  check("origin パターンで要求する", perm.ok && requestedOrigins.includes("http://epi1-ubu-1:8501/*"),
+  const perm = await ctx.ensureHostPermission("http://example-host:8501");
+  check("origin パターンで要求する", perm.ok && requestedOrigins.includes("http://example-host:8501/*"),
     JSON.stringify(requestedOrigins));
   const bad = await ctx.ensureHostPermission("not a url");
   check("不正URLを弾く", !bad.ok, bad.message);

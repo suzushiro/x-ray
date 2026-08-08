@@ -1,2 +1,26 @@
+# 実データ。クッキー（生きたセッショントークン）・DB・画像が入る。絶対に上げない
 data/
-app/seed_accounts.py
+*.db
+*.db-wal
+*.db-shm
+cookies.txt
+tools/accounts.txt
+
+# 環境ごとの設定。IPアドレスなど公開したくない値
+.env
+!.env.example
+
+# ブラウザプロファイル（ログインセッションの実体）
+tools/profiles/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# エディタ・OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
