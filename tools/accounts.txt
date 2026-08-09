@@ -1,8 +1,0 @@
-# 1行1ユーザー名。cookies.txt のユーザー名と一致させること。
-xconnecter01
-xconnecter02
-xconnecter03
-xconnecter04
-xconnecter05
-xconnecter06
-xconnecter07

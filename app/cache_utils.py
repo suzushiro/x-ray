@@ -25,7 +25,7 @@ CACHE_RETENTION_DAYS = int(os.environ.get("CACHE_RETENTION_DAYS", "30"))
 PERSIST_CATEGORIES = [
     c.strip()
     for c in os.environ.get(
-        "PERSIST_CATEGORIES", "ギャル,illustrator,photographer,gadget"
+        "PERSIST_CATEGORIES", ""
     ).split(",")
     if c.strip()
 ]

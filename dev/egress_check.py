@@ -185,6 +185,32 @@ if ex.exists():
         check(f".env.example に {k}", k in e)
 check(".env 実体が同梱されていない", not (HERE / ".." / ".env").exists())
 
+print("\n== 公開ファイルに環境固有の情報が無いか ==")
+# 実ホスト名・実カテゴリ・実監視垢など、公開したくない語
+SECRETS = ["epimetheus", "epi1-doc", "epi1-ubu", "jcom", "JCOM", "au光",
+           "110.173.240.104", "192.168.0.60", "192.168.1.10",
+           "nullzebra", "nemoto_nagi", "ギャル"]
+PUBLIC = ["README.md", ".env.example", "docker-compose.yml", ".gitignore",
+          "app/scraper.py", "app/web.py", "app/db.py", "app/cache_utils.py",
+          "tools/cookie_harvester.py", "tools/accounts.example.txt",
+          "extension/common.js", "extension/options.html"]
+for f in PUBLIC:
+    fp = HERE / ".." / f
+    if not fp.exists():
+        continue
+    body = fp.read_text()
+    hit = [w for w in SECRETS if w in body]
+    check(f"{f}", not hit, str(hit))
+
+print("\n== 作業メモ ==")
+notes = HERE / ".." / "NOTES.local.md"
+check("NOTES.local.md がある", notes.exists())
+if notes.exists():
+    n = notes.read_text()
+    check("実際の構成が書かれている", "110.173.240.104" in n and "jcom-proxy" in n)
+gi2 = (HERE / ".." / ".gitignore").read_text()
+check(".gitignore が NOTES.local.md を除外", "NOTES.local.md" in gi2)
+
 print("\n== scraper のCLI ==")
 sc = (APP / "scraper.py").read_text()
 check("check-egress サブコマンドがある", '"check-egress"' in sc)

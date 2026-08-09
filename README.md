@@ -1,7 +1,10 @@
 # X-Ray
 
-NotionのXアカウントDBを元に、監視対象アカウントの投稿を15分おきに取得し、
-カテゴリ別に切り替えて見られるWebビューア。
+監視対象のXアカウントの投稿を定期的に取得してアーカイブし、
+カテゴリ別に切り替えて閲覧できるセルフホスト型のWebビューア。
+
+自分用のツールとして作っているため、動作は無保証。
+X側の仕様変更で壊れることがある。
 
 ## 技術スタック
 
@@ -16,7 +19,7 @@ NotionのXアカウントDBを元に、監視対象アカウントの投稿を15
 | **定期実行** | cron（コンテナ内） | 15分おきにスクレイプ |
 | **フロントエンド** | Vanilla JS + CSS | フレームワーク不使用 |
 | **アイコン取得** | [unavatar.io](https://unavatar.io) | RT元アカウントのアイコン取得に使用 |
-| **動作環境** | Ubuntu Linux + Docker | 自宅サーバー想定 |
+| **動作環境** | Linux + Docker | セルフホスト想定 |
 
 ## 構成
 
@@ -25,7 +28,7 @@ worker (Python + twscrape + cron)
   └─ 15分おきに監視対象の最新ツイートを取得 → SQLiteに保存
 
 web (Flask)
-  └─ http://<host>:8501 でカテゴリタブ切り替えビューア
+  └─ http://<host>:<WEB_PORT> でカテゴリタブ切り替えビューア
 ```
 
 ## セットアップ手順
@@ -84,7 +87,7 @@ docker exec -it x-ray-worker python scraper.py
 ### 6. ブラウザで確認
 
 ```
-http://<サーバーのIP>:8501
+http://<サーバーのIP>:<WEB_PORT>   # WEB_PORT の既定は 8501
 ```
 
 投稿一覧が表示されて、カテゴリタブが切り替えられればセットアップ完了。
@@ -92,19 +95,19 @@ http://<サーバーのIP>:8501
 ## 運用Tips
 
 - **ログ確認**: `docker exec -it x-ray-worker tail -f /var/log/scraper.log`
-- **状態確認画面**: `http://<host>:8501/status` でアカウントごとの最終取得時刻・エラー履歴が見れる
+- **状態確認画面**: `http://<host>:<WEB_PORT>/status` でアカウントごとの最終取得時刻・エラー履歴が見れる
 - **再ログインが必要になったら**: `docker exec -it x-ray-worker python scraper.py relogin`
 - **監視対象を増やしたい・編集したい**:
 
-  **方法A: Web UI（推奨）** — `http://<host>:8501/manage` の管理ページから
+  **方法A: Web UI（推奨）** — `http://<host>:<WEB_PORT>/manage` の管理ページから
   アカウントの追加・削除ができる。追加は即DBに反映され、`data/accounts.json` にも保存される。
 
   **方法B: accounts.json を直接編集** — `data/accounts.json` を編集して `docker compose restart worker`。
   ```json
   {
-    "categories": ["ギャル", "videogame", "..."],
+    "categories": ["art", "gadget", "..."],
     "accounts": [
-      {"screen_name": "nemoto_nagi", "display_name": "根本凪", "categories": ["ギャル"]}
+      {"screen_name": "example_user", "display_name": "表示名", "categories": ["art"]}
     ]
   }
   ```
@@ -116,7 +119,7 @@ http://<サーバーのIP>:8501
   監視対象マスタは `data/accounts.json` で一元管理される（`seed_accounts.py` の `ACCOUNTS_FALLBACK`
   は accounts.json が存在しない場合の初期データとしてのみ使用される）。
 
-- **クッキー更新**: `http://<host>:8501/manage` の管理ページからブラウザで貼り付けて更新できる。
+- **クッキー更新**: `http://<host>:<WEB_PORT>/manage` の管理ページからブラウザで貼り付けて更新できる。
   更新後、サーバーで `docker exec -it x-ray-worker python scraper.py add-cookies` を実行して反映。
 
 - **取得間隔を変えたい**: `Dockerfile.worker` の cron 設定（デフォルト `*/15 * * * *` = 15分おき）を編集してrebuild。
@@ -136,7 +139,7 @@ http://<サーバーのIP>:8501
 cd dev
 export DB_PATH=/tmp/xtest/data.db IMAGES_DIR=/tmp/xtest/images CACHE_DIR=/tmp/xtest/cache
 export TWITTER_COOKIES_FILE=/tmp/xtest/cookies.txt ACCOUNTS_JSON_PATH=/tmp/xtest/accounts.json
-export PERSIST_CATEGORIES="ギャル,illustrator,photographer,gadget" CACHE_RETENTION_DAYS=30
+export PERSIST_CATEGORIES="art,gadget" CACHE_RETENTION_DAYS=30
 
 python seed_dummy.py    # 引用RT/画像/動画/自己リプ/ブックマーク入りのダミーDBを作成
 python route_check.py   # 全ルートを叩いてステータス＋引用カードの描画を確認
@@ -170,7 +173,7 @@ python cookie_harvester.py --out ../data/cookies.txt
 python cookie_harvester.py --refresh --out ../data/cookies.txt
 
 # 別マシンから <host> の web に直接反映
-python cookie_harvester.py --refresh --push http://<host>:8501
+python cookie_harvester.py --refresh --push http://<host>:<WEB_PORT>
 
 # 書き込まずに状態だけ見る（期限切れ検知）
 python cookie_harvester.py --check
@@ -210,7 +213,7 @@ Firefox の **コンテナ（Multi-Account Containers）** ごとに X のクッ
      （**再起動で消える**）
    - 恒久: AMO で unlisted 署名を取って `.xpi` をインストール。
      または Developer Edition / ESR で `xpinstall.signatures.required=false`
-4. 拡張の設定を開き、サーバーURL（例 `http://<host>:8501`）と
+4. 拡張の設定を開き、サーバーURL（例 `http://<サーバー>:<WEB_PORT>`）と
    コンテナ→ユーザー名の対応を設定する。「コンテナ名をそのまま垢名にする」で一括入力できる
 
 ### 使い方
@@ -275,28 +278,16 @@ docker exec -it x-ray-worker python scraper.py add-cookies
 - API: `POST /api/media/delete` に `tweet_id` + `index`（1枚）または
   `tweet_id` + `all=1`（投稿の画像全部）
 
-## スクレイピング出口の分離（専用回線）
+## スクレイピング出口の分離（任意）
 
 IPレピュテーションが落ちた時にメイン回線を巻き込まないよう、スクレイピングの出口を
-別回線に分離できる。使わない場合は `PROXY_URL` を空にしておけば素通しになる。
+別回線やVPNに逃がせる。使わない場合は `PROXY_URL` を空にしておけば素通しになる。
 
-### 構成の例（Proxmox）
-
-- サブ回線をUSB LANアダプタで接続し、ブリッジ（例 `vmbr1`）を作成
-- 軽量プロキシ用のLXCを1台立てる（Alpine / 1コア・256MB で足りる）
-  - eth0: 内部LAN側（プロキシの入口）
-  - eth1: サブ回線側（実際の出口）
-  - tinyproxy を内部LAN側でListenさせ、LAN内からのみ Allow
-- デフォルトルートをサブ回線側に固定し、**コンテナ内のIPv6を無効化する**
-  （有効だとIPv6経路でメイン回線から出てしまい分離が崩れる）
-
-### X-Ray側
-
-`.env` に設定する。実際のIPアドレスはここにだけ書き、リポジトリには含めない。
+`.env` に設定する。
 
 ```
-PROXY_URL=http://<プロキシのLAN側IP>:8888
-EXPECTED_EGRESS_IP=<サブ回線のグローバルIP>
+PROXY_URL=http://<プロキシのアドレス>:<ポート>
+EXPECTED_EGRESS_IP=<想定する出口のグローバルIP>
 ```
 
 worker にのみproxy環境変数が渡る（web はスクレイピングしないため不要）。
@@ -310,17 +301,17 @@ docker compose exec worker python scraper.py check-egress  # 想定IPと自動�
 ```
 
 `EXPECTED_EGRESS_IP` を設定していると、**スクレイプ開始前に自動で出口を照合し、
-想定と違えば中止する**。設定漏れやIPv6漏れで気づかずメイン回線から出続けるのを防ぐため。
+想定と違えば中止する**。設定漏れで気づかずメイン回線から出続けるのを防ぐため。
 無効化するには空にする。
 
 ### 注意点
 
-- DockerホストがIPv6グローバルを持つ場合、環境変数を入れ忘れたコンテナはIPv6で
-  メイン回線から出る。**設定漏れが分離の抜け穴になる**
+- ホストがIPv6グローバルを持つ場合、proxy環境変数を設定していないコンテナはIPv6で
+  メイン回線から出る。**設定漏れが分離の抜け穴になる**ので、プロキシ側でIPv6を
+  無効化しておくとよい
 - curl-cffi（twscrape）も urllib（画像DL）も標準のproxy環境変数を尊重することは実測済み
   （大文字・小文字の両方、`NO_PROXY` の除外も動作確認）
-- サブ回線が遅い場合、スループットがボトルネックになりうる
-- グローバルIPが変わったら `.env` の `EXPECTED_EGRESS_IP` を更新する
+- 出口のグローバルIPが変わったら `.env` の `EXPECTED_EGRESS_IP` を更新する
 
 ## 設定と秘密情報
 
@@ -338,3 +329,6 @@ vi .env
 - `tools/profiles/` — ブラウザのログインセッション
 
 `docker-compose.yml` には実IPを書かず、`${PROXY_URL}` のように `.env` を参照させること。
+
+環境固有の手順や構成のメモは `NOTES.local.md`（`.gitignore` 済み）に置いている。
+公開リポジトリに含めたくない実IP・ホスト名・監視対象などはそちらに書く。

@@ -454,7 +454,14 @@ async def scrape_all():
 
     screen_names = get_all_screen_names()
     print(f"[*] {len(screen_names)}件の監視対象を取得開始")
-    print(f"[*] 永続カテゴリ: {', '.join(PERSIST_CATEGORIES)} → {IMAGES_DIR}")
+    if PERSIST_CATEGORIES:
+        print(f"[*] 永続カテゴリ: {', '.join(PERSIST_CATEGORIES)} → {IMAGES_DIR}")
+    else:
+        # 空だと全画像がキャッシュ扱いになり CACHE_RETENTION_DAYS 後に消える。
+        # .env の読み込み漏れで静かにデータを失わないよう警告する。
+        print("[!] PERSIST_CATEGORIES が空です。全画像がキャッシュ扱いになり、"
+              f"{os.environ.get('CACHE_RETENTION_DAYS', '30')}日後に自動削除されます。")
+        print("[!] 永続保存したいカテゴリがある場合は .env の PERSIST_CATEGORIES を設定してください。")
     print(f"[*] それ以外はキャッシュ → {CACHE_DIR}")
 
     for screen_name in screen_names:

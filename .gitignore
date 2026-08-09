@@ -10,6 +10,11 @@ tools/accounts.txt
 .env
 !.env.example
 
+# 作業メモ。実IP・ホスト名・アカウント名を含むので公開しない
+NOTES.local.md
+*.local.md
+NOTES.md
+
 # ブラウザプロファイル（ログインセッションの実体）
 tools/profiles/
 
