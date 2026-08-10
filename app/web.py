@@ -652,7 +652,13 @@ def api_share_prepare():
     conn.commit()
 
     share_url = f"{PUBLIC_SHARE_BASE_URL}/share/{token}"
+    # 画像URLを直接返す。Tumblrのシェアツールに content として渡すことで、
+    # canonicalUrl を X の元投稿に向けたまま画像を載せられる。
+    image_urls = [f"{PUBLIC_SHARE_BASE_URL}/share-img/{token}/{i}"
+                  for i in range(len(images))]
     return jsonify({"ok": True, "share_url": share_url,
+                    "image_urls": image_urls,
+                    "source_url": source_url,
                     "expires_in_min": SHARE_TOKEN_TTL_MIN})
 
 

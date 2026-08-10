@@ -81,6 +81,14 @@ token = j["share_url"].rsplit("/", 1)[-1]
 check("トークンがDBに入る", db.get_conn().execute(
     "SELECT 1 FROM share_tokens WHERE token=?", (token,)).fetchone() is not None)
 
+print("\n== APIが画像URLと出典を返す ==")
+check("image_urls を返す", isinstance(j.get("image_urls"), list) and len(j["image_urls"]) == 2,
+      str(j.get("image_urls")))
+check("画像URLが絶対URL", all(u.startswith("https://share.example.com/share-img/")
+                              for u in j.get("image_urls", [])), str(j.get("image_urls")))
+check("source_url が X の元投稿", j.get("source_url") == "https://x.com/alice/status/t1",
+      str(j.get("source_url")))
+
 print("\n== OGPページ ==")
 html = client.get(f"/share/{token}").get_data(as_text=True)
 check("og:image がある", 'property="og:image"' in html)
@@ -210,6 +218,14 @@ _n = int(_m.group(1)) if _m else 0
 check("ローカル画像ありにボタンが出る（1件につき1個）", _n >= 1,
       f"count={_n} {r.stderr[-100:]}")
 check("共有モーダルがある", "MODAL" in out and "NOMODAL" not in out)
+
+print("\n== Tumblrへ渡すパラメータ ==")
+js = (HERE / ".." / "app" / "templates" / "_scripts.html").read_text()
+check("posttype=photo を渡す", "params.set('posttype', 'photo')" in js)
+check("content に画像URLを渡す", "params.set('content'" in js and "image_urls" in js)
+check("canonicalUrl は元投稿", "params.set('canonicalUrl', srcUrl)" in js)
+check("キャプションを元投稿へのリンクにする", '<a href="${srcUrl}">' in js)
+check("共有ドメインを canonicalUrl にしていない", "canonicalUrl', data.share_url" not in js)
 
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
 sys.exit(1 if fails else 0)

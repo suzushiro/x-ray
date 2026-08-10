@@ -320,11 +320,16 @@ docker compose exec worker python scraper.py check-egress  # 想定IPと自動�
 
 ### 仕組み
 
-Tumblr のシェアツールは、渡された `canonicalUrl` のページを読みに来て、
-`og:image` タグから Photo Post を作る。そのため画像を含む OGP ページを
-**Tumblr のサーバーから到達できる場所**に置く必要がある。
+Tumblr のシェアツールには、写真URLを直接渡す `content` パラメータと、
+出典（リンク先）になる `canonicalUrl` がある。X-Ray はこう組み合わせている。
 
-X-Ray はこれを単一投稿ページ `/share/<token>` として提供する。
+- `content` … `/share-img/<token>/<n>` の画像URL（カンマ区切りで複数枚）
+- `canonicalUrl` … **Xの元投稿URL**。Tumblr上の出典表示がこれになる
+- `caption` … 元投稿へのリンク付きテキスト
+
+画像URLは Tumblr のサーバーから取得されるため、`/share-img` だけは
+外部から到達できる必要がある。`/share/<token>` は OGP 付きの
+プレビューページとしても機能する（共有リンクを直接開いた場合用）。
 
 - `token` は投稿ごとにランダム生成（列挙不可）。`SHARE_TOKEN_TTL_MIN` 後に自動失効
 - このページは確定済みの画像とキャプションだけを返し、DBの中身は晒さない
@@ -354,8 +359,7 @@ X-Ray本体（`/manage` やDB）は公開しないこと。Cloudflare Tunnel を
 ### 注意点
 
 - 共有できるのは**ローカル保存済みの画像**のみ（リモートのみ・削除済みは対象外）
-- Tumblrのシェアツールに `canonicalUrl` として渡すのは公開URLなので、
-  外部到達性が無いと画像なしのLink Postになる（前回この方式でこけた原因がこれ）
+- 画像URL（`/share-img`）に外部到達性が無いと、画像が読み込まれず投稿できない
 - 公開するのは投稿ページのみ。スクレイパーや管理画面は絶対に外に出さないこと
 
 ## 設定と秘密情報

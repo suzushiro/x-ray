@@ -32,7 +32,7 @@
         <input type="text" id="tmb-tags">
       </div>
       <div class="tmb-note">
-        「Tumblrで開く」を押すと共有用リンクが{{ '' }}発行され、Tumblrの投稿画面が開きます。
+        「Tumblrで開く」で画像を読み込んだ投稿画面が開きます。出典はXの元投稿になります。
         そこで最終確認してから投稿してください。
       </div>
       <div class="tmb-msg" id="tmb-msg"></div>
@@ -350,11 +350,21 @@ async function tmbOpen() {
             go.disabled = false;
             return;
         }
-        // Tumblrのシェアツールを canonicalUrl 付きで開く
+        // 画像URLを content で直接渡し、canonicalUrl（＝出典）は X の元投稿にする。
+        // こうすると Tumblr 側の出典表示が share ドメインではなく元ポストになる。
         const params = new URLSearchParams();
-        params.set('canonicalUrl', data.share_url);
+        params.set('posttype', 'photo');
+        params.set('content', (data.image_urls || []).join(','));
+
+        const srcUrl = data.source_url || tmbCtx.url;
+        if (srcUrl) params.set('canonicalUrl', srcUrl);
+
+        // キャプションは元投稿へのリンクにする（HTML可）
         const caption = document.getElementById('tmb-caption').value.trim();
-        if (caption) params.set('caption', caption);
+        if (caption) {
+            params.set('caption', srcUrl
+                ? `<a href="${srcUrl}">${caption}</a>` : caption);
+        }
         const tags = document.getElementById('tmb-tags').value.trim();
         if (tags) params.set('tags', tags);
         const shareTool = 'https://www.tumblr.com/widgets/share/tool?' + params.toString();
