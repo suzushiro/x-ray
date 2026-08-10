@@ -447,8 +447,22 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 .tmb-x { margin-left: auto; color: var(--text-dim); font-size: 20px; cursor: pointer; }
 .tmb-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
 .tmb-label { color: var(--text-dim); font-size: 12px; margin-bottom: 6px; }
-.tmb-imgs { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 6px; }
-.tmb-imgs img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+/* プレビューは「どの1枚を添付するか」の選択UIを兼ねる */
+.tmb-imgs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+.tmb-imgs img {
+    height: 84px; border-radius: 6px; object-fit: cover; flex: none;
+    cursor: pointer; border: 2px solid transparent; opacity: .55;
+    transition: opacity .1s, border-color .1s;
+}
+.tmb-imgs img:hover { opacity: .85; }
+.tmb-imgs img.selected { opacity: 1; border-color: #1d9bf0; }
+/* 全枚数モードでは1枚選択が無意味なので選択の見た目を消す */
+.tmb-imgs.all-mode img { opacity: 1; border-color: transparent; cursor: default; }
+.tmb-check {
+    display: flex; align-items: center; gap: 6px; margin: 6px 0 0;
+    font-size: 12px; color: var(--text-dim); cursor: pointer; user-select: none;
+}
+.tmb-check input { cursor: pointer; width: auto; }
 .tmb-body textarea, .tmb-body input[type=text] {
     width: 100%; box-sizing: border-box; background: var(--input-bg, #1c2732);
     border: 1px solid var(--border); border-radius: 8px; color: var(--text);

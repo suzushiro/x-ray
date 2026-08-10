@@ -21,7 +21,18 @@
     <div class="tmb-body">
       <div>
         <div class="tmb-label" id="tmb-imgcount">画像</div>
+        <div class="tmb-note" id="tmb-multi-note" style="display:none">
+          いまの Tumblr は複数枚の自動添付が効きません。使う画像をクリックで選んでください。
+        </div>
         <div class="tmb-imgs" id="tmb-imgs"></div>
+        <label class="tmb-check" id="tmb-all-wrap" style="display:none">
+          <input type="checkbox" id="tmb-all" onchange="tmbAllToggled()">
+          <span>全枚数を渡す（実験）</span>
+        </label>
+        <div class="tmb-note" id="tmb-all-note" style="display:none">
+          本来の仕様どおりの渡し方です。Tumblr 側が直れば画像が全部入ります。
+          空の投稿画面になるなら、まだ直っていません。
+        </div>
       </div>
       <div>
         <div class="tmb-label">キャプション</div>
@@ -294,6 +305,8 @@ function removeImageFromDom(btn) {
 
 // ===== Tumblr 共有 =====
 let tmbCtx = null;
+let tmbSelected = 0;      // 添付する画像のインデックス
+let tmbSendAll = false;   // 全枚数を渡す実験モード
 
 function openTumblrShare(btn) {
     const cats = btn.dataset.cats ? JSON.parse(atob(btn.dataset.cats)) : [];
@@ -303,16 +316,37 @@ function openTumblrShare(btn) {
         url: btn.dataset.url,
     };
 
-    // カード内のローカル画像のサムネを集める（表示中のものをそのまま使う）
+    // カード内のローカル画像のサムネを集める（表示中のものをそのまま使う）。
+    //
+    // **このプレビューは「どの1枚を添付するか」の選択UIを兼ねる。**
+    // Tumblr のシェアツールは複数枚の自動添付をやめており、
+    // content にカンマ区切りで複数URLを渡すとフェッチ自体をせず
+    // 空の投稿画面になる（1枚なら今も自動添付される）。
+    // Tumblr が廃止した選択ステップを、このモーダルが代わりに引き受ける。
+    tmbSelected = 0;
     const card = btn.closest('.tweet') || document;
     const imgs = [...card.querySelectorAll('.tweet-media img')].map(i => i.getAttribute('src'));
     const box = document.getElementById('tmb-imgs');
     box.innerHTML = '';
-    imgs.forEach(src => {
+    imgs.forEach((src, i) => {
         const im = document.createElement('img');
-        im.src = src; box.appendChild(im);
+        im.src = src;
+        im.className = i === 0 ? 'selected' : '';
+        im.title = (i + 1) + '枚目を添付';
+        im.onclick = () => {
+            tmbSelected = i;
+            box.querySelectorAll('img').forEach((el, j) =>
+                el.classList.toggle('selected', j === i));
+        };
+        box.appendChild(im);
     });
     document.getElementById('tmb-imgcount').textContent = `画像（${imgs.length}枚）`;
+
+    // 複数枚のときだけ注記と実験トグルを出す
+    const multi = imgs.length > 1;
+    document.getElementById('tmb-all-wrap').style.display = multi ? '' : 'none';
+    document.getElementById('tmb-all').checked = tmbSendAll;
+    tmbUpdateModeUI(multi);
 
     // キャプション初期値: @handle（本文は入れず、リンクはTumblr側で付ける想定）
     document.getElementById('tmb-caption').value = `@${tmbCtx.handle}`;
@@ -321,6 +355,21 @@ function openTumblrShare(btn) {
     document.getElementById('tmb-go').disabled = false;
 
     document.getElementById('tmb').classList.add('open');
+}
+
+function tmbAllToggled() {
+    tmbSendAll = document.getElementById('tmb-all').checked;
+    const multi = document.querySelectorAll('#tmb-imgs img').length > 1;
+    tmbUpdateModeUI(multi);
+}
+
+function tmbUpdateModeUI(multi) {
+    document.getElementById('tmb-multi-note').style.display =
+        (multi && !tmbSendAll) ? '' : 'none';
+    document.getElementById('tmb-all-note').style.display =
+        (multi && tmbSendAll) ? '' : 'none';
+    // 全枚数モードでは1枚選択が無意味なので選択の見た目を落とす
+    document.getElementById('tmb-imgs').classList.toggle('all-mode', tmbSendAll);
 }
 
 function tmbClose() {
@@ -352,9 +401,27 @@ async function tmbOpen() {
         }
         // 画像URLを content で直接渡し、canonicalUrl（＝出典）は X の元投稿にする。
         // こうすると Tumblr 側の出典表示が share ドメインではなく元ポストになる。
+        const urls = data.image_urls || [];
+        if (!urls.length) {
+            msg.className = 'tmb-msg err';
+            msg.textContent = '画像URLが取得できませんでした';
+            go.disabled = false;
+            return;
+        }
+
         const params = new URLSearchParams();
         params.set('posttype', 'photo');
-        params.set('content', (data.image_urls || []).join(','));
+
+        // **選んだ1枚だけを渡す。**
+        // 仕様上は content にカンマ区切りで複数枚渡せることになっているが、
+        // 現在の Tumblr は複数枚だとフェッチせず空の投稿画面になる。
+        // prepare は全枚数ぶんのURLを返し続けているので、
+        // Tumblr が選択画面を復活させたら join(',') に戻すだけでよい。
+        if (tmbSendAll) {
+            params.set('content', urls.join(','));
+        } else {
+            params.set('content', urls[Math.min(tmbSelected, urls.length - 1)]);
+        }
 
         const srcUrl = data.source_url || tmbCtx.url;
         if (srcUrl) params.set('canonicalUrl', srcUrl);
