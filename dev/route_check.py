@@ -91,5 +91,20 @@ for path, needle, label in checks:
     if not hit:
         fails.append((path, f"missing {needle}"))
 
+print("\n== テンプレートの閉じタグ漏れ ==")
+# <style>/<script> の閉じタグ外にコードが漏れていないか（cat >> 追記ミスの検出）
+for path in ("/"):
+    html = client.get("/").get_data(as_text=True)
+    style_after = html.split("</style>", 1)[1] if "</style>" in html else ""
+    css_leak = ".tmb-go" in style_after or "border-radius:" in style_after[:2000]
+    print(f"{'OK ' if not css_leak else 'NG '} </style>の外にCSSが漏れていない")
+    if css_leak:
+        fails.append("CSS leak")
+    # style/script タグの開閉が1:1
+    ok_tags = html.count("<style") == html.count("</style>")
+    print(f"{'OK ' if ok_tags else 'NG '} styleタグの開閉が一致")
+    if not ok_tags:
+        fails.append("style tag mismatch")
+
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)} 件: {fails} ==="))
 sys.exit(1 if fails else 0)
