@@ -368,10 +368,25 @@ async function tmbOpen() {
     }
 }
 
-// 背景クリックで閉じる
-document.addEventListener('click', (e) => {
+// このモーダルは × / キャンセル以外では閉じない。
+// 背景クリックやキー操作で不意に消えると入力中の内容が失われるため。
+// 内側のイベントが下のハンドラ（ライトボックスのキー操作等）へ伝播するのも止める。
+(function () {
     const wrap = document.getElementById('tmb');
-    if (wrap && e.target === wrap) tmbClose();
-});
+    if (!wrap) return;
+    const stop = (e) => e.stopPropagation();
+    ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress'].forEach(
+        (ev) => wrap.addEventListener(ev, stop));
+
+    // Escape では閉じる。ただし裏のライトボックスには伝えない。
+    // （マウス操作や他のキーでは閉じない）
+    document.addEventListener('keydown', (e) => {
+        if (!wrap.classList.contains('open')) return;
+        if (e.key !== 'Escape') return;
+        e.stopPropagation();
+        e.preventDefault();
+        tmbClose();
+    }, true);   // キャプチャ段階で先に受け取る
+})();
 
 </script>
