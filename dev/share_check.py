@@ -194,7 +194,9 @@ conn.commit(); conn.close()
 os.makedirs(os.environ['IMAGES_DIR'], exist_ok=True)
 open(os.environ['IMAGES_DIR']+'/a.jpg','wb').write(b'x')
 h = web.app.test_client().get('/').get_data(as_text=True)
-print('BTN' if 'openTumblrShare' in h else 'NOBTN')
+# JS定義(function openTumblrShare)ではなく、実ボタンのonclickを数える
+n = h.count('onclick=\"openTumblrShare')
+print('BTNCOUNT=' + str(n))
 print('MODAL' if 'id=\"tmb\"' in h else 'NOMODAL')
 """ % str(HERE / ".." / "app")
 env = dict(os.environ)
@@ -202,7 +204,11 @@ env["PUBLIC_SHARE_BASE_URL"] = "https://share.example.com"
 env["SHARE_TOKEN_TTL_MIN"] = "60"
 r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env)
 out = r.stdout
-check("ローカル画像ありにボタンが出る", "BTN" in out and "NOBTN" not in out, r.stderr[-120:])
+import re as _re2
+_m = _re2.search(r"BTNCOUNT=(\d+)", out)
+_n = int(_m.group(1)) if _m else 0
+check("ローカル画像ありにボタンが出る（1件につき1個）", _n >= 1,
+      f"count={_n} {r.stderr[-100:]}")
 check("共有モーダルがある", "MODAL" in out and "NOMODAL" not in out)
 
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
