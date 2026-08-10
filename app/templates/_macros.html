@@ -115,6 +115,13 @@
             <button class="dl-btn" data-imgs="{{ t.media_b64 }}" data-handle="{{ t.screen_name }}"
                     data-dt="{{ t.created_at_dt }}" onclick="dlAllBtn(this)">↓ {{ t.display_imgs|length }}枚</button>
             {% endif %}
+            {% if t.has_local_media and share_enabled %}
+            <button class="tumblr-btn" title="Tumblrに投稿"
+                    data-tid="{{ t.tweet_id }}" data-handle="{{ t.screen_name }}"
+                    data-url="{{ t.url }}"
+                    data-cats="{{ t.categories_b64 }}"
+                    onclick="openTumblrShare(this)">t</button>
+            {% endif %}
             <a href="{{ t.url }}" target="_blank" class="tweet-link">Xで見る →</a>
         </div>
     </div>

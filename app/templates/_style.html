@@ -422,3 +422,52 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 .disk-bar { height: 10px; border-radius: 5px; background: var(--border); overflow: hidden; margin-top: 8px; }
 .disk-bar .fill { height: 100%; background: linear-gradient(90deg, #1d9bf0, #00ba7c); }
 </style>
+
+/* ===== Tumblr 共有 ===== */
+.tumblr-btn {
+    width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    font-weight: 700; font-family: Georgia, serif; font-size: 15px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.tumblr-btn:hover { background: #00b8ff; border-color: #00b8ff; color: #0a1620; }
+
+.tmb-wrap {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 1000; padding: 16px;
+}
+.tmb-wrap.open { display: flex; }
+.tmb-card {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 16px;
+    width: 100%; max-width: 460px; overflow: hidden; box-shadow: 0 12px 40px rgba(0,0,0,.5);
+}
+.tmb-head {
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px; font-weight: 600;
+}
+.tmb-x { margin-left: auto; color: var(--text-dim); font-size: 20px; cursor: pointer; }
+.tmb-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.tmb-label { color: var(--text-dim); font-size: 12px; margin-bottom: 6px; }
+.tmb-imgs { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 6px; }
+.tmb-imgs img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+.tmb-body textarea, .tmb-body input[type=text] {
+    width: 100%; box-sizing: border-box; background: var(--input-bg, #1c2732);
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+    padding: 8px 10px; font-size: 13px; font-family: inherit; resize: vertical;
+}
+.tmb-note {
+    background: var(--surface, #1a2530); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 11px; color: var(--text-dim);
+}
+.tmb-msg { font-size: 12px; min-height: 1em; color: var(--text-dim); }
+.tmb-msg.err { color: #f4212e; }
+.tmb-foot { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; gap: 10px; }
+.tmb-cancel {
+    flex: 1; padding: 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: transparent; color: var(--text); font-size: 14px; cursor: pointer;
+}
+.tmb-go {
+    flex: 2; padding: 10px; border-radius: 999px; border: none;
+    background: #00b8ff; color: #0a1620; font-weight: 700; font-size: 14px; cursor: pointer;
+}
+.tmb-go:disabled { opacity: .5; cursor: default; }

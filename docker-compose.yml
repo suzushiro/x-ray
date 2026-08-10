@@ -54,6 +54,10 @@ services:
       DB_PATH: /data/data.db
       TWITTER_COOKIES_FILE: /data/cookies.txt
       ACCOUNTS_JSON_PATH: /data/accounts.json
+      # Tumblr共有（/share を外部公開する場合のみ設定）
+      PUBLIC_SHARE_BASE_URL: "${PUBLIC_SHARE_BASE_URL:-}"
+      PUBLIC_SHARE_HOST: "${PUBLIC_SHARE_HOST:-}"
+      SHARE_TOKEN_TTL_MIN: "${SHARE_TOKEN_TTL_MIN:-60}"
     # web はスクレイピングしないのでproxyは設定しない
     depends_on:
       - worker

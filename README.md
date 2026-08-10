@@ -313,6 +313,51 @@ docker compose exec worker python scraper.py check-egress  # 想定IPと自動�
   （大文字・小文字の両方、`NO_PROXY` の除外も動作確認）
 - 出口のグローバルIPが変わったら `.env` の `EXPECTED_EGRESS_IP` を更新する
 
+## Tumblr共有（任意）
+
+投稿カードの Tumblr ボタンから、ローカル保存済みの画像を Tumblr に投稿できる。
+確認画面でキャプション・タグを編集してから、Tumblr の投稿画面を開く二段構え。
+
+### 仕組み
+
+Tumblr のシェアツールは、渡された `canonicalUrl` のページを読みに来て、
+`og:image` タグから Photo Post を作る。そのため画像を含む OGP ページを
+**Tumblr のサーバーから到達できる場所**に置く必要がある。
+
+X-Ray はこれを単一投稿ページ `/share/<token>` として提供する。
+
+- `token` は投稿ごとにランダム生成（列挙不可）。`SHARE_TOKEN_TTL_MIN` 後に自動失効
+- このページは確定済みの画像とキャプションだけを返し、DBの中身は晒さない
+- 外部公開が必要なのは `/share` と `/share-img` の2ルートだけ
+
+### セットアップ
+
+`.env` に外部公開時のベースURLを設定する。
+
+```
+PUBLIC_SHARE_BASE_URL=https://share.example.com
+SHARE_TOKEN_TTL_MIN=60
+```
+
+`PUBLIC_SHARE_HOST` も設定すると、そのホスト名宛のリクエストを web 側でも
+`/share` 系だけに制限する（リバースプロキシの制限に加えた二層目の防御）。
+通常は `PUBLIC_SHARE_BASE_URL` から自動抽出されるので省略可。
+
+そして `/share` と `/share-img` だけをリバースプロキシで外に出す。
+X-Ray本体（`/manage` やDB）は公開しないこと。Cloudflare Tunnel を使う場合の
+設定例と手順は `deploy/` にある。ドメインを持っていない場合、動作確認だけなら
+`cloudflared tunnel --url http://localhost:8501` のクイックトンネルで試せる
+（URLは起動ごとに変わるので常用には向かない）。
+
+`PUBLIC_SHARE_BASE_URL` を空にすると共有ボタンは表示されず、機能は無効になる。
+
+### 注意点
+
+- 共有できるのは**ローカル保存済みの画像**のみ（リモートのみ・削除済みは対象外）
+- Tumblrのシェアツールに `canonicalUrl` として渡すのは公開URLなので、
+  外部到達性が無いと画像なしのLink Postになる（前回この方式でこけた原因がこれ）
+- 公開するのは投稿ページのみ。スクレイパーや管理画面は絶対に外に出さないこと
+
 ## 設定と秘密情報
 
 環境ごとの値は `.env` に置く。`docker compose` が自動で読み込む。

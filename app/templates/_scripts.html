@@ -11,6 +11,40 @@
     <div class="lb-counter" id="lb-counter"></div>
 </div>
 
+{% if share_enabled %}
+<div class="tmb-wrap" id="tmb" aria-hidden="true">
+  <div class="tmb-card" role="dialog" aria-label="Tumblrに投稿">
+    <div class="tmb-head">
+      <span>📷 Tumblr に投稿</span>
+      <span class="tmb-x" onclick="tmbClose()">×</span>
+    </div>
+    <div class="tmb-body">
+      <div>
+        <div class="tmb-label" id="tmb-imgcount">画像</div>
+        <div class="tmb-imgs" id="tmb-imgs"></div>
+      </div>
+      <div>
+        <div class="tmb-label">キャプション</div>
+        <textarea id="tmb-caption" rows="2"></textarea>
+      </div>
+      <div>
+        <div class="tmb-label">タグ（カンマ区切り）</div>
+        <input type="text" id="tmb-tags">
+      </div>
+      <div class="tmb-note">
+        「Tumblrで開く」を押すと共有用リンクが{{ '' }}発行され、Tumblrの投稿画面が開きます。
+        そこで最終確認してから投稿してください。
+      </div>
+      <div class="tmb-msg" id="tmb-msg"></div>
+    </div>
+    <div class="tmb-foot">
+      <button class="tmb-cancel" onclick="tmbClose()">キャンセル</button>
+      <button class="tmb-go" id="tmb-go" onclick="tmbOpen()">Tumblrで開く</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <script>
 // テーマ
 function toggleTheme() {
@@ -256,4 +290,88 @@ function removeImageFromDom(btn) {
     note.dataset.n = n;
     note.textContent = `画像${n}枚を削除しました`;
 }
+
+
+// ===== Tumblr 共有 =====
+let tmbCtx = null;
+
+function openTumblrShare(btn) {
+    const cats = btn.dataset.cats ? JSON.parse(atob(btn.dataset.cats)) : [];
+    tmbCtx = {
+        tid: btn.dataset.tid,
+        handle: btn.dataset.handle,
+        url: btn.dataset.url,
+    };
+
+    // カード内のローカル画像のサムネを集める（表示中のものをそのまま使う）
+    const card = btn.closest('.tweet') || document;
+    const imgs = [...card.querySelectorAll('.tweet-media img')].map(i => i.getAttribute('src'));
+    const box = document.getElementById('tmb-imgs');
+    box.innerHTML = '';
+    imgs.forEach(src => {
+        const im = document.createElement('img');
+        im.src = src; box.appendChild(im);
+    });
+    document.getElementById('tmb-imgcount').textContent = `画像（${imgs.length}枚）`;
+
+    // キャプション初期値: @handle（本文は入れず、リンクはTumblr側で付ける想定）
+    document.getElementById('tmb-caption').value = `@${tmbCtx.handle}`;
+    document.getElementById('tmb-tags').value = cats.join(', ');
+    document.getElementById('tmb-msg').textContent = '';
+    document.getElementById('tmb-go').disabled = false;
+
+    document.getElementById('tmb').classList.add('open');
+}
+
+function tmbClose() {
+    document.getElementById('tmb').classList.remove('open');
+    tmbCtx = null;
+}
+
+async function tmbOpen() {
+    if (!tmbCtx) return;
+    const go = document.getElementById('tmb-go');
+    const msg = document.getElementById('tmb-msg');
+    go.disabled = true;
+    msg.className = 'tmb-msg';
+    msg.textContent = '共有リンクを準備中…';
+
+    const fd = new FormData();
+    fd.set('tweet_id', tmbCtx.tid);
+    fd.set('caption', document.getElementById('tmb-caption').value.trim());
+    fd.set('tags', document.getElementById('tmb-tags').value.trim());
+
+    try {
+        const res = await fetch('/api/share/prepare', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!data.ok) {
+            msg.className = 'tmb-msg err';
+            msg.textContent = data.error || '準備に失敗しました';
+            go.disabled = false;
+            return;
+        }
+        // Tumblrのシェアツールを canonicalUrl 付きで開く
+        const params = new URLSearchParams();
+        params.set('canonicalUrl', data.share_url);
+        const caption = document.getElementById('tmb-caption').value.trim();
+        if (caption) params.set('caption', caption);
+        const tags = document.getElementById('tmb-tags').value.trim();
+        if (tags) params.set('tags', tags);
+        const shareTool = 'https://www.tumblr.com/widgets/share/tool?' + params.toString();
+
+        window.open(shareTool, '_blank', 'width=540,height=600');
+        tmbClose();
+    } catch (e) {
+        msg.className = 'tmb-msg err';
+        msg.textContent = '通信エラー: ' + e;
+        go.disabled = false;
+    }
+}
+
+// 背景クリックで閉じる
+document.addEventListener('click', (e) => {
+    const wrap = document.getElementById('tmb');
+    if (wrap && e.target === wrap) tmbClose();
+});
+
 </script>

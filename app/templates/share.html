@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+
+{# Tumblrのシェアツールはこのog:imageを読んでPhoto Postを作る #}
+<meta property="og:type" content="article">
+<meta property="og:title" content="{{ title }}">
+{% if caption %}<meta property="og:description" content="{{ caption }}">{% endif %}
+{% if og_image %}<meta property="og:image" content="{{ og_image }}">{% endif %}
+<meta property="og:url" content="{{ canonical }}">
+<link rel="canonical" href="{{ canonical }}">
+
+<style>
+  body { margin: 0; background: #15202b; color: #e7e9ea;
+         font: 15px/1.6 -apple-system, "Segoe UI", "Hiragino Sans", sans-serif;
+         display: flex; flex-direction: column; align-items: center; padding: 24px; }
+  .imgs { max-width: 640px; width: 100%; }
+  .imgs img { width: 100%; border-radius: 12px; margin-bottom: 8px; display: block; }
+  .cap { max-width: 640px; margin: 12px 0; }
+  .tags { color: #8b98a5; font-size: 13px; }
+  a { color: #1d9bf0; }
+</style>
+</head>
+<body>
+  <div class="imgs">
+    {% for u in img_urls %}<img src="{{ u }}" alt="">{% endfor %}
+  </div>
+  {% if caption %}<div class="cap">{{ caption }}</div>{% endif %}
+  {% if tags %}<div class="tags cap">#{{ tags | join(' #') }}</div>{% endif %}
+  {% if source_url %}<div class="cap"><a href="{{ source_url }}">元の投稿</a></div>{% endif %}
+</body>
+</html>

@@ -193,7 +193,9 @@ SECRETS = ["epimetheus", "epi1-doc", "epi1-ubu", "jcom", "JCOM", "au光",
 PUBLIC = ["README.md", ".env.example", "docker-compose.yml", ".gitignore",
           "app/scraper.py", "app/web.py", "app/db.py", "app/cache_utils.py",
           "tools/cookie_harvester.py", "tools/accounts.example.txt",
-          "extension/common.js", "extension/options.html"]
+          "extension/common.js", "extension/options.html",
+          "app/templates/share.html", "deploy/cloudflared-config.example.yml",
+          "deploy/README.md", "docker-compose.yml"]
 for f in PUBLIC:
     fp = HERE / ".." / f
     if not fp.exists():

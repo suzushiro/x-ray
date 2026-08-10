@@ -146,6 +146,23 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_media_index_sha ON media_index(sha256)
     """)
 
+    # Tumblr共有用の一時トークン。
+    # /share/<token> として単一投稿のOGPページを外部公開するためのもの。
+    # token を知らないと辿れない（列挙不可）＋ expires_at で自動失効。
+    # X-Ray本体を晒さず、この1ページだけをリバースプロキシで外に出す運用。
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS share_tokens (
+        token       TEXT PRIMARY KEY,
+        tweet_id    TEXT NOT NULL,
+        payload     TEXT NOT NULL,   -- 確認画面で確定した内容のスナップショット(JSON)
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL
+    )
+    """)
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_share_tokens_exp ON share_tokens(expires_at)
+    """)
+
     # 手動で削除した画像の墓標。remote_url をキーにすることで
     # tweets / bookmarks の両方、および再スクレイプ時の再DLを一括で抑止する。
     # ここに行があれば「その画像は二度と表示も取得もしない」。
