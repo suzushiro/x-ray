@@ -43,21 +43,14 @@
         <input type="text" id="tmb-tags">
       </div>
       {% if tumblr_enabled %}
-      <div class="tmb-row">
-        <div style="flex:1">
-          <div class="tmb-label">投稿先</div>
-          <select id="tmb-account"></select>
-        </div>
-        <div style="flex:1">
-          <div class="tmb-label">公開状態</div>
-          <select id="tmb-state">
-            <option value="published">公開</option>
-            <option value="draft">下書き</option>
-            <option value="private">非公開</option>
-            <option value="queue">キュー</option>
-          </select>
-        </div>
+      <div>
+        <div class="tmb-label">投稿先</div>
+        <select id="tmb-account"></select>
       </div>
+      <label class="tmb-check">
+        <input type="checkbox" id="tmb-draft" onchange="tmbDraftToggled()">
+        <span>下書きとして投稿する（公開しない）</span>
+      </label>
       {% endif %}
       {% if tumblr_enabled %}
       <div class="tmb-note">
@@ -382,7 +375,12 @@ function openTumblrShare(btn) {
     document.getElementById('tmb-go').disabled = false;
 
     const go = document.getElementById('tmb-go');
-    go.textContent = document.getElementById('tmb-account') ? '投稿する' : 'Tumblrで開く';
+    go.disabled = false;
+    if (document.getElementById('tmb-account')) {
+        tmbDraftToggled();      // トグルの状態に合わせた文言にする
+    } else {
+        go.textContent = 'Tumblrで開く';
+    }
     tmbLoadAccounts();
     document.getElementById('tmb').classList.add('open');
 }
@@ -422,7 +420,7 @@ async function tmbPost() {
     fd.set('caption', document.getElementById('tmb-caption').value.trim());
     fd.set('tags', document.getElementById('tmb-tags').value.trim());
     fd.set('account', document.getElementById('tmb-account').value);
-    fd.set('state', document.getElementById('tmb-state').value);
+    fd.set('state', document.getElementById('tmb-draft').checked ? 'draft' : 'published');
     // 全枚数モードでなければ選んだ1枚だけ。APIは複数枚に対応している。
     const total = document.querySelectorAll('#tmb-imgs img').length;
     if (!tmbSendAll && total > 1) fd.set('indices', String(tmbSelected));
@@ -448,6 +446,13 @@ async function tmbPost() {
         msg.textContent = '通信エラー: ' + e;
         go.disabled = false;
     }
+}
+
+function tmbDraftToggled() {
+    const go = document.getElementById('tmb-go');
+    if (!go || !document.getElementById('tmb-account')) return;
+    go.textContent = document.getElementById('tmb-draft').checked
+        ? '下書きに保存' : '投稿する';
 }
 
 function tmbAllToggled() {
