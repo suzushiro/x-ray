@@ -57,6 +57,10 @@ services:
       # Tumblr共有（/share を外部公開する場合のみ設定）
       PUBLIC_SHARE_BASE_URL: "${PUBLIC_SHARE_BASE_URL:-}"
       PUBLIC_SHARE_HOST: "${PUBLIC_SHARE_HOST:-}"
+      # Tumblr直接投稿（設定するとトンネル不要）
+      TUMBLR_CONSUMER_KEY: "${TUMBLR_CONSUMER_KEY:-}"
+      TUMBLR_CONSUMER_SECRET: "${TUMBLR_CONSUMER_SECRET:-}"
+      TUMBLR_ACCOUNTS_FILE: "${TUMBLR_ACCOUNTS_FILE:-/data/tumblr_accounts.json}"
       SHARE_TOKEN_TTL_MIN: "${SHARE_TOKEN_TTL_MIN:-60}"
     # web はスクレイピングしないのでproxyは設定しない
     depends_on:

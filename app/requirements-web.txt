@@ -1,4 +1,6 @@
 # web コンテナ専用。web.py は twscrape に依存しないため除外している。
-# （worker 側は app/requirements.txt を使う）
 flask==3.0.3
 waitress==3.0.0
+# Tumblr投稿（OAuth1署名）
+requests==2.32.3
+requests-oauthlib==2.0.0

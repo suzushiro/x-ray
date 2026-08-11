@@ -1,0 +1,3 @@
+# tools/tumblr_auth.py 用。手元で1回動かすだけ。
+requests>=2.31
+requests-oauthlib>=2.0

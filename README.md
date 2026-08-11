@@ -313,7 +313,64 @@ docker compose exec worker python scraper.py check-egress  # 想定IPと自動�
   （大文字・小文字の両方、`NO_PROXY` の除外も動作確認）
 - 出口のグローバルIPが変わったら `.env` の `EXPECTED_EGRESS_IP` を更新する
 
-## Tumblr共有（任意）
+## Tumblr投稿（API直接 / 推奨）
+
+`.env` に Tumblr のアプリキーを設定すると、確認画面から**そのまま投稿できる**。
+画像はローカルファイルを直接アップロードするので、**外部公開（トンネル）は不要**。
+複数アカウント（メイン/サブ）の切り替えと、公開/下書き/非公開/キューの指定ができる。
+
+### セットアップ
+
+1. https://www.tumblr.com/oauth/apps でアプリを登録する
+   - コールバックURL と OAuth2リダイレクトURL は `http://localhost:8765/callback`
+   - 発行された Consumer Key / Secret を `.env` に入れる
+
+```
+TUMBLR_CONSUMER_KEY=xxxx
+TUMBLR_CONSUMER_SECRET=yyyy
+```
+
+2. アカウントごとに認可する（1回だけ。OAuth1のトークンは失効しない）
+
+```bash
+cd tools
+pip install -r requirements-tumblr.txt
+export TUMBLR_CONSUMER_KEY=xxxx TUMBLR_CONSUMER_SECRET=yyyy
+
+python tumblr_auth.py --label main --out ../data/tumblr_accounts.json
+python tumblr_auth.py --label sub  --out ../data/tumblr_accounts.json   # 別アカウントでログインして許可
+
+python tumblr_auth.py --list --out ../data/tumblr_accounts.json         # 確認
+```
+
+ブラウザが開くので、そのラベルで使いたいアカウントでログインして許可する。
+別々のTumblrアカウントでも、ラベルを分ければ両方登録できる。
+
+3. `docker compose up -d web`
+
+`data/tumblr_accounts.json` には**アクセストークンが入る**。gitignore 済み。
+バックアップにも含めないこと。
+
+### 使い方
+
+投稿カードの `t` ボタン → 確認画面で投稿先・公開状態・キャプション・タグを決めて「投稿する」。
+出典はXの元投稿になる。
+
+センシティブな画像をサブに投げてメインからリブログする運用なら、
+投稿先で `sub` を選んで投稿し、リブログはTumblr側で行う。
+
+### 注意
+
+- レート制限は1日250投稿・250画像アップロード。手動投稿では当たらない
+- `TUMBLR_CONSUMER_KEY` が未設定なら投稿機能は無効になり、
+  下記の共有リンク方式（トンネル経由）にフォールバックする
+
+## Tumblr共有（トンネル方式 / フォールバック）
+
+API投稿が使えない場合の代替。Tumblrのシェアツールを開く方式で、
+Tumblrのサーバーから画像を取得させるため外部公開が必要。
+
+
 
 投稿カードの Tumblr ボタンから、ローカル保存済みの画像を Tumblr に投稿できる。
 確認画面でキャプション・タグを編集してから、Tumblr の投稿画面を開く二段構え。

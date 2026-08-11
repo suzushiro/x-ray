@@ -4,6 +4,7 @@ data/
 *.db-wal
 *.db-shm
 cookies.txt
+tumblr_accounts.json
 tools/accounts.txt
 
 # 環境ごとの設定。IPアドレスなど公開したくない値

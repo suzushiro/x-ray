@@ -11,7 +11,7 @@
     <div class="lb-counter" id="lb-counter"></div>
 </div>
 
-{% if share_enabled %}
+{% if share_enabled or tumblr_enabled %}
 <div class="tmb-wrap" id="tmb" aria-hidden="true">
   <div class="tmb-card" role="dialog" aria-label="Tumblrに投稿">
     <div class="tmb-head">
@@ -42,15 +42,42 @@
         <div class="tmb-label">タグ（カンマ区切り）</div>
         <input type="text" id="tmb-tags">
       </div>
+      {% if tumblr_enabled %}
+      <div class="tmb-row">
+        <div style="flex:1">
+          <div class="tmb-label">投稿先</div>
+          <select id="tmb-account"></select>
+        </div>
+        <div style="flex:1">
+          <div class="tmb-label">公開状態</div>
+          <select id="tmb-state">
+            <option value="published">公開</option>
+            <option value="draft">下書き</option>
+            <option value="private">非公開</option>
+            <option value="queue">キュー</option>
+          </select>
+        </div>
+      </div>
+      {% endif %}
+      {% if tumblr_enabled %}
+      <div class="tmb-note">
+        選んだ投稿先にそのまま投稿します。出典はXの元投稿になります。
+      </div>
+      {% else %}
       <div class="tmb-note">
         「Tumblrで開く」で画像を読み込んだ投稿画面が開きます。出典はXの元投稿になります。
         そこで最終確認してから投稿してください。
       </div>
+      {% endif %}
       <div class="tmb-msg" id="tmb-msg"></div>
     </div>
     <div class="tmb-foot">
       <button class="tmb-cancel" onclick="tmbClose()">キャンセル</button>
+      {% if tumblr_enabled %}
+      <button class="tmb-go" id="tmb-go" onclick="tmbPost()">投稿する</button>
+      {% else %}
       <button class="tmb-go" id="tmb-go" onclick="tmbOpen()">Tumblrで開く</button>
+      {% endif %}
     </div>
   </div>
 </div>
@@ -354,7 +381,73 @@ function openTumblrShare(btn) {
     document.getElementById('tmb-msg').textContent = '';
     document.getElementById('tmb-go').disabled = false;
 
+    const go = document.getElementById('tmb-go');
+    go.textContent = document.getElementById('tmb-account') ? '投稿する' : 'Tumblrで開く';
+    tmbLoadAccounts();
     document.getElementById('tmb').classList.add('open');
+}
+
+// 投稿先の一覧を一度だけ読み込む
+let tmbAccounts = null;
+async function tmbLoadAccounts() {
+    const sel = document.getElementById('tmb-account');
+    if (!sel || tmbAccounts) return;
+    try {
+        const res = await fetch('/api/tumblr/accounts');
+        const data = await res.json();
+        tmbAccounts = data.accounts || [];
+        sel.innerHTML = '';
+        tmbAccounts.forEach(a => {
+            const o = document.createElement('option');
+            o.value = a.label;
+            o.textContent = `${a.label}（${a.blog}）`;
+            sel.appendChild(o);
+        });
+    } catch (e) {
+        tmbAccounts = null;   // 次回また試す
+    }
+}
+
+// API経由で直接投稿する。トンネルも公開URLも不要。
+async function tmbPost() {
+    if (!tmbCtx) return;
+    const go = document.getElementById('tmb-go');
+    const msg = document.getElementById('tmb-msg');
+    go.disabled = true;
+    msg.className = 'tmb-msg';
+    msg.textContent = '投稿中…';
+
+    const fd = new FormData();
+    fd.set('tweet_id', tmbCtx.tid);
+    fd.set('caption', document.getElementById('tmb-caption').value.trim());
+    fd.set('tags', document.getElementById('tmb-tags').value.trim());
+    fd.set('account', document.getElementById('tmb-account').value);
+    fd.set('state', document.getElementById('tmb-state').value);
+    // 全枚数モードでなければ選んだ1枚だけ。APIは複数枚に対応している。
+    const total = document.querySelectorAll('#tmb-imgs img').length;
+    if (!tmbSendAll && total > 1) fd.set('indices', String(tmbSelected));
+
+    try {
+        const res = await fetch('/api/tumblr/post', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!data.ok) {
+            msg.className = 'tmb-msg err';
+            msg.textContent = '失敗: ' + (data.error || '不明なエラー');
+            go.disabled = false;
+            return;
+        }
+        msg.className = 'tmb-msg ok';
+        const stateLabel = { published: '公開', draft: '下書き', private: '非公開',
+                             queue: 'キュー' }[data.state] || data.state;
+        msg.innerHTML = `投稿しました（${data.label} / ${stateLabel} / ${data.count}枚）` +
+            (data.post_url ? ` <a href="${data.post_url}" target="_blank">開く</a>` : '');
+        go.textContent = '投稿済み';
+        setTimeout(tmbClose, 1800);
+    } catch (e) {
+        msg.className = 'tmb-msg err';
+        msg.textContent = '通信エラー: ' + e;
+        go.disabled = false;
+    }
 }
 
 function tmbAllToggled() {

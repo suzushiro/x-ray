@@ -17,6 +17,7 @@ from flask import g
 from db import get_conn
 import seed_accounts
 import cache_utils
+import tumblr_client
 
 # Tumblr共有ページを外部公開する際のベースURL（例: https://share.example.com）。
 # 未設定なら共有機能は無効。X-Ray本体ではなく /share/<token> だけを
@@ -58,7 +59,10 @@ def _restrict_public_host():
 @app.context_processor
 def _inject_share_flag():
     # 全テンプレートで share_enabled を参照できるようにする
-    return {"share_enabled": bool(PUBLIC_SHARE_BASE_URL)}
+    return {
+        "share_enabled": bool(PUBLIC_SHARE_BASE_URL),
+        "tumblr_enabled": tumblr_client.is_configured(),
+    }
 
 
 def db():
@@ -714,6 +718,85 @@ def share_image(token, idx):
     if os.path.exists(os.path.join(IMAGES_DIR, filename)):
         return send_from_directory(IMAGES_DIR, filename)
     return send_from_directory(CACHE_DIR, filename)
+
+
+def _local_image_paths(tweet_id, conn, indices=None):
+    """
+    投稿に紐づくローカル画像の実ファイルパスを返す。
+    削除済み・ローカル未保存は除外する。indices を渡すとその添字だけに絞る。
+    """
+    names = _share_images_for(tweet_id, conn)
+    if indices is not None:
+        names = [n for i, n in enumerate(names) if i in indices]
+    paths = []
+    for n in names:
+        for d in (IMAGES_DIR, CACHE_DIR):
+            fp = os.path.join(d, n)
+            if os.path.exists(fp):
+                paths.append(fp)
+                break
+    return paths
+
+
+@app.route("/api/tumblr/accounts")
+def api_tumblr_accounts():
+    """投稿先の一覧。トークンは返さない。"""
+    return jsonify({"ok": True,
+                    "enabled": tumblr_client.is_configured(),
+                    "accounts": tumblr_client.public_accounts()})
+
+
+@app.route("/api/tumblr/post", methods=["POST"])
+def api_tumblr_post():
+    """
+    Tumblr に直接投稿する。画像はローカルファイルをそのままアップロードするので、
+    外部公開（トンネル）は不要。
+    """
+    if not tumblr_client.is_configured():
+        return jsonify({"ok": False,
+                        "error": "Tumblr投稿が未設定です（キーまたはアカウント）"}), 400
+
+    tweet_id = (request.form.get("tweet_id") or "").strip()
+    if not tweet_id:
+        return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
+
+    account = tumblr_client.find_account((request.form.get("account") or "").strip())
+    if not account:
+        return jsonify({"ok": False, "error": "投稿先アカウントが見つかりません"}), 400
+
+    state = (request.form.get("state") or "published").strip()
+    if state not in tumblr_client.VALID_STATES:
+        return jsonify({"ok": False, "error": f"stateが不正です: {state}"}), 400
+
+    # 添付する画像の添字（未指定なら全部）
+    raw_idx = (request.form.get("indices") or "").strip()
+    indices = None
+    if raw_idx:
+        try:
+            indices = {int(x) for x in raw_idx.split(",") if x.strip() != ""}
+        except ValueError:
+            return jsonify({"ok": False, "error": "indicesが不正です"}), 400
+
+    conn = db()
+    paths = _local_image_paths(tweet_id, conn, indices)
+    if not paths:
+        return jsonify({"ok": False, "error": "投稿できるローカル画像がありません"}), 400
+
+    row = conn.execute("SELECT url FROM tweets WHERE tweet_id=?", (tweet_id,)).fetchone()
+    source_url = row["url"] if row else ""
+
+    caption = (request.form.get("caption") or "").strip()
+    if caption and source_url:
+        caption = f'<a href="{source_url}">{caption}</a>'
+    tags = [t.strip() for t in (request.form.get("tags") or "").split(",") if t.strip()]
+
+    res = tumblr_client.create_photo_post(
+        account, paths, caption=caption, tags=tags, state=state, source_url=source_url)
+    if not res.get("ok"):
+        return jsonify(res), 502
+    res["label"] = account["label"]
+    res["count"] = len(paths)
+    return jsonify(res)
 
 
 @app.route("/api/media/delete", methods=["POST"])
