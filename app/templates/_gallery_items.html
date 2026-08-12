@@ -1,13 +1,10 @@
 {# 無限スクロール用: ギャラリーのグリッドアイテムだけを返すパーシャル #}
 {% for it in items %}
 <div class="gallery-item" data-imgs="{{ [it.img] | tojson | b64encode }}" data-idx="0"
-     data-handle="{{ it.screen_name }}" data-tid="{{ it.tweet_id }}" data-fidx="{{ it.idx }}"
+     data-handle="{{ it.screen_name }}" data-tid="{{ it.tweet_id }}" data-fidx="{{ it.idx }}" data-mindexes="{{ it.media_index }}"
      data-dt="{{ it.created_at[:10] }}" onclick="imgClick(this)">
     <img src="{{ it.img }}" loading="lazy" alt="">
     <div class="gi-overlay">@{{ it.screen_name }}</div>
-    <button class="img-del" title="この画像を削除" aria-label="この画像を削除"
-            data-tid="{{ it.tweet_id }}" data-mindex="{{ it.media_index }}"
-            onclick="deleteImage(this, event)">🗑</button>
 </div>
 {% endfor %}
 {% if next_url %}<div class="infinite-sentinel" data-next-url="{{ next_url }}"></div>{% endif %}

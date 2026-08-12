@@ -1,6 +1,8 @@
 <div class="lb-wrap" id="lb">
     <div class="lb-toolbar">
         <button class="lb-tbtn" id="lb-dl" onclick="lbDownload()">↓ 保存</button>
+        <button class="lb-tbtn lb-del" id="lb-del" onclick="lbDelete()"
+                title="この画像を削除">🗑 削除</button>
         <button class="lb-tbtn" onclick="lbClose()">✕</button>
     </div>
     <div class="lb-body" id="lb-body" onclick="lbBodyClick(event)">
@@ -93,8 +95,10 @@ updateThemeBtn(document.documentElement.getAttribute('data-theme'));
 
 // ライトボックス
 let lbImgs = [], lbIdx = 0, lbHandle = '', lbDt = '', lbNames = [];
-function lbOpen(imgs, idx, handle, dt, names) {
+let lbTid = '', lbMIdx = [];   // 削除用: 元投稿IDと、表示中→元インデックスの対応
+function lbOpen(imgs, idx, handle, dt, names, tid, mindexes) {
     lbImgs = imgs; lbIdx = idx; lbHandle = handle; lbDt = dt; lbNames = names || [];
+    lbTid = tid || ''; lbMIdx = mindexes || [];
     lbShow();
     document.getElementById('lb').classList.add('open');
     document.addEventListener('keydown', lbKey);
@@ -107,6 +111,14 @@ function lbShow() {
     if (next) next.style.display = multi ? '' : 'none';
     document.getElementById('lb-counter').textContent = multi ? `${lbIdx+1} / ${lbImgs.length}` : '';
     const btn = document.getElementById('lb-dl'); btn.textContent = '↓ 保存'; btn.disabled = false;
+    // 削除は元投稿が分かるときだけ出す
+    const del = document.getElementById('lb-del');
+    if (del) {
+        const can = !!lbTid && lbMIdx[lbIdx] !== undefined;
+        del.style.display = can ? '' : 'none';
+        del.textContent = '🗑 削除';
+        del.disabled = false;
+    }
 }
 function lbClose() { document.getElementById('lb').classList.remove('open'); document.removeEventListener('keydown', lbKey); }
 function lbNav(d) { lbIdx = (lbIdx + d + lbImgs.length) % lbImgs.length; lbShow(); }
@@ -135,8 +147,11 @@ function imgClick(imgEl) {
         const ext = (imgs[0].split('?')[0].split('.').pop() || 'jpg').slice(0, 4);
         names = [`${w.dataset.handle}_${w.dataset.tid}_${w.dataset.fidx || 1}.${ext}`];
     }
+    const mindexes = (w.dataset.mindexes || '').split(',')
+        .filter(x => x !== '').map(Number);
     lbOpen(imgs, parseInt(imgEl.dataset.idx || 0),
-           w.dataset.handle || '', w.dataset.dt || '', names);
+           w.dataset.handle || '', w.dataset.dt || '', names,
+           w.dataset.tid || '', mindexes);
 }
 async function dlOne(url, fn) {
     const r = await fetch(url); const b = await r.blob();
@@ -254,74 +269,96 @@ window.addEventListener('resize', adjustStickyTops);
     });
 })();
 
-// 画像削除。サーバー上の実ファイルも消える（復元不可）
-async function deleteImage(btn, ev) {
-    if (ev) ev.stopPropagation();   // ギャラリーではカードのクリック（拡大）を止める
+// 画像削除。ライトボックスの中からのみ実行する。
+// 一覧にゴミ箱を常設すると鬱陶しいので、拡大して確認してから消す導線に一本化した。
+// サーバー上の実ファイルも消える（復元不可）。
+async function lbDelete() {
+    if (!lbTid) return;
+    const mindex = lbMIdx[lbIdx];
+    if (mindex === undefined) return;
     if (!confirm('この画像を削除します。サーバー上のファイルも消え、元に戻せません。よろしいですか？')) return;
 
-    const tid = btn.dataset.tid;
-    const index = btn.dataset.mindex;
+    const btn = document.getElementById('lb-del');
     btn.disabled = true;
-    btn.textContent = '…';
+    btn.textContent = '削除中…';
 
     const fd = new FormData();
-    fd.set('tweet_id', tid);
-    fd.set('index', index);
+    fd.set('tweet_id', lbTid);
+    fd.set('index', mindex);
 
     try {
         const res = await fetch('/api/media/delete', { method: 'POST', body: fd });
         const data = await res.json();
         if (!data.ok) {
             alert('削除できませんでした: ' + (data.error || '不明なエラー'));
-            btn.disabled = false; btn.textContent = '🗑';
+            btn.disabled = false; btn.textContent = '🗑 削除';
             return;
         }
-        removeImageFromDom(btn);
     } catch (e) {
         alert('通信エラー: ' + e);
-        btn.disabled = false; btn.textContent = '🗑';
-    }
-}
-
-// 削除後の見た目をその場で更新する（リロード不要）
-function removeImageFromDom(btn) {
-    const galleryItem = btn.closest('.gallery-item');
-    if (galleryItem) { galleryItem.remove(); return; }
-
-    const cell = btn.closest('.media-cell');
-    if (!cell) return;
-    const wrap = cell.closest('.tweet-media');
-    cell.remove();
-
-    const left = wrap.querySelectorAll('.media-cell').length;
-    if (left === 0) {
-        const note = document.createElement('div');
-        note.className = 'media-deleted';
-        note.textContent = '画像を削除しました';
-        wrap.replaceWith(note);
+        btn.disabled = false; btn.textContent = '🗑 削除';
         return;
     }
-    if (left === 1) { wrap.classList.remove('multi'); wrap.classList.add('single'); }
 
-    // 拡大表示用のURL配列と data-idx を振り直す
-    const imgs = [...wrap.querySelectorAll('img')];
-    imgs.forEach((img, i) => img.dataset.idx = i);
-    try {
-        wrap.dataset.imgs = btoa(unescape(encodeURIComponent(
-            JSON.stringify(imgs.map(i => i.getAttribute('src'))))));
-    } catch (e) { /* 拡大表示が古いままでも致命ではない */ }
+    removeFromPage(lbTid, mindex);
 
-    let note = wrap.parentNode.querySelector('.media-deleted.inline');
-    if (!note) {
-        note = document.createElement('div');
-        note.className = 'media-deleted inline';
-        wrap.after(note);
-    }
-    const n = (parseInt(note.dataset.n || '0', 10) || 0) + 1;
-    note.dataset.n = n;
-    note.textContent = `画像${n}枚を削除しました`;
+    // ライトボックス側の状態からも取り除く
+    lbImgs.splice(lbIdx, 1);
+    lbMIdx.splice(lbIdx, 1);
+    if (lbNames.length > lbIdx) lbNames.splice(lbIdx, 1);
+    if (!lbImgs.length) { lbClose(); return; }
+    if (lbIdx >= lbImgs.length) lbIdx = lbImgs.length - 1;
+    lbShow();
 }
 
+// 背後のページから削除済み画像を取り除く（リロード不要）
+function removeFromPage(tid, mindex) {
+    // ギャラリー: 該当カードごと消す
+    document.querySelectorAll(`.gallery-item[data-tid="${tid}"]`).forEach(el => {
+        const m = (el.dataset.mindexes || '').split(',').map(Number);
+        if (m.includes(mindex)) el.remove();
+    });
+
+    // 投稿カード: 該当画像だけ消して、残りに合わせて表示を組み直す
+    document.querySelectorAll(`.tweet-media[data-tid="${tid}"]`).forEach(wrap => {
+        const m = (wrap.dataset.mindexes || '').split(',')
+            .filter(x => x !== '').map(Number);
+        const pos = m.indexOf(mindex);
+        if (pos < 0) return;
+        const imgs = [...wrap.querySelectorAll('img')];
+        if (imgs[pos]) imgs[pos].remove();
+        m.splice(pos, 1);
+        wrap.dataset.mindexes = m.join(',');
+
+        const left = wrap.querySelectorAll('img').length;
+        if (left === 0) {
+            const note = document.createElement('div');
+            note.className = 'media-deleted';
+            note.textContent = '画像を削除しました';
+            wrap.replaceWith(note);
+            return;
+        }
+        if (left === 1) { wrap.classList.remove('multi'); wrap.classList.add('single'); }
+
+        // 拡大表示用のURL配列と data-idx を振り直す
+        const rest = [...wrap.querySelectorAll('img')];
+        rest.forEach((img, i) => img.dataset.idx = i);
+        try {
+            wrap.dataset.imgs = btoa(unescape(encodeURIComponent(
+                JSON.stringify(rest.map(i => i.getAttribute('src'))))));
+        } catch (e) { /* 拡大表示が古いままでも致命ではない */ }
+
+        let note = wrap.parentNode.querySelector('.media-deleted.inline');
+        if (!note) {
+            note = document.createElement('div');
+            note.className = 'media-deleted inline';
+            wrap.after(note);
+        }
+        const n = (parseInt(note.dataset.n || '0', 10) || 0) + 1;
+        note.dataset.n = n;
+        note.textContent = `画像${n}枚を削除しました`;
+    });
+}
 
 // ===== Tumblr 共有 =====
 let tmbCtx = null;
@@ -369,7 +406,7 @@ function openTumblrShare(btn) {
     tmbUpdateModeUI(multi);
 
     // キャプション初期値: @handle（本文は入れず、リンクはTumblr側で付ける想定）
-    document.getElementById('tmb-caption').value = `@${tmbCtx.handle}`;
+    document.getElementById('tmb-caption').value = tmbCtx.handle;
     document.getElementById('tmb-tags').value = cats.join(', ');
     document.getElementById('tmb-msg').textContent = '';
     document.getElementById('tmb-go').disabled = false;

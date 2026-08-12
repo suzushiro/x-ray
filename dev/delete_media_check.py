@@ -150,11 +150,15 @@ check("media_idx が元インデックスを保つ", ft["media_idx"] == [1], str
 client = app.test_client()
 html = client.get("/").get_data(as_text=True)
 check("トップに削除通知が出る", "枚を削除しました" in html)
-check("削除ボタンが描画される", 'class="img-del"' in html)
+check("一覧にゴミ箱を出さない", 'class="img-del"' not in html)
+check("ライトボックスに削除ボタンがある", 'id="lb-del"' in html)
+check("削除に必要な情報を渡している",
+      'data-tid=' in html and 'data-mindexes=' in html)
 check("削除済み画像は出ない", "/images/a.jpg" not in html)
 
 g = client.get("/gallery").get_data(as_text=True)
 check("ギャラリーから消える", "media/a.jpg" not in g and "/images/a.jpg" not in g)
+check("ギャラリーにもゴミ箱を出さない", 'class="img-del"' not in g)
 check("残りはギャラリーに出る", "/images/b.jpg" in g)
 
 bm = client.get("/bookmarks").get_data(as_text=True)

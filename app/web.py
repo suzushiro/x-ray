@@ -22,6 +22,33 @@ import tumblr_client
 # Tumblr共有ページを外部公開する際のベースURL（例: https://share.example.com）。
 # 未設定なら共有機能は無効。X-Ray本体ではなく /share/<token> だけを
 # リバースプロキシ等で外に出し、この値をそのドメインにする。
+# カテゴリ名 → Tumblrタグ の変換表。
+# X-Ray内部のカテゴリ名をそのままタグにすると都合が悪いものを置き換える。
+# JSONで上書きできる: TUMBLR_TAG_MAP='{"ギャル":"girl","R18":"nsfw"}'
+# 空文字を指定するとそのカテゴリはタグから除外される。
+_DEFAULT_TAG_MAP = {"ギャル": "girl"}
+try:
+    _raw_tag_map = os.environ.get("TUMBLR_TAG_MAP", "").strip()
+    TUMBLR_TAG_MAP = json.loads(_raw_tag_map) if _raw_tag_map else dict(_DEFAULT_TAG_MAP)
+    if not isinstance(TUMBLR_TAG_MAP, dict):
+        raise ValueError("dictではありません")
+except (ValueError, TypeError) as _e:
+    print(f"[!] TUMBLR_TAG_MAP を解釈できません（既定値を使います）: {_e}")
+    TUMBLR_TAG_MAP = dict(_DEFAULT_TAG_MAP)
+
+
+def map_tags(categories):
+    """カテゴリ名リストをTumblr用のタグリストに変換する。空になるものは落とす。"""
+    out = []
+    for c in categories or []:
+        t = TUMBLR_TAG_MAP.get(c, c)
+        if not t:
+            continue          # 空文字指定＝タグにしない
+        if t not in out:      # 変換で重複しうるので潰す
+            out.append(t)
+    return out
+
+
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
 SHARE_TOKEN_TTL_MIN = int(os.environ.get("SHARE_TOKEN_TTL_MIN", "60") or 60)
@@ -182,9 +209,13 @@ def format_tweet(d, bookmarked_ids=None, deleted=None):
         (d["local_media"][i] if i < len(d["local_media"]) else None)
         for i, remote in enumerate(d["media"]) if remote not in deleted
     )
-    # カテゴリをタグ用にbase64で渡す（| e がJSONを壊す既知問題の回避）
+    # カテゴリをタグ用にbase64で渡す（| e がJSONを壊す既知問題の回避）。
+    # 表示用のカテゴリ名ではなく、変換表を通したTumblrタグを渡す。
+    # ensure_ascii は既定のまま（True）。日本語カテゴリを \uXXXX に逃がさないと
+    # JS側の atob() が UTF-8 バイトを扱えず壊れる。
+    _tags = map_tags(d["categories_list"])
     d["categories_b64"] = base64.b64encode(
-        json.dumps(d["categories_list"]).encode()).decode() if d["categories_list"] else ""
+        json.dumps(_tags).encode()).decode() if _tags else ""
 
     d["media_b64"] = base64.b64encode(
         json.dumps(display_imgs).encode()

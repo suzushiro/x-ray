@@ -73,15 +73,10 @@
 
     {% if t.display_imgs %}
     <div class="tweet-media {% if t.display_imgs|length == 1 %}single{% else %}multi{% endif %}"
-         data-imgs="{{ t.media_b64 }}" data-handle="{{ t.screen_name }}" data-dt="{{ t.created_at_dt }}">
+         data-imgs="{{ t.media_b64 }}" data-handle="{{ t.screen_name }}" data-dt="{{ t.created_at_dt }}"
+         data-tid="{{ t.tweet_id }}" data-mindexes="{{ t.media_idx | join(',') }}">
         {% for m in t.display_imgs %}
-        <div class="media-cell">
-            <img src="{{ m }}" loading="lazy" data-idx="{{ loop.index0 }}" onclick="imgClick(this)">
-            <button class="img-del" title="この画像を削除" aria-label="この画像を削除"
-                    data-tid="{{ t.tweet_id }}"
-                    data-mindex="{{ t.media_idx[loop.index0] }}"
-                    onclick="deleteImage(this, event)">🗑</button>
-        </div>
+        <img src="{{ m }}" loading="lazy" data-idx="{{ loop.index0 }}" onclick="imgClick(this)">
         {% endfor %}
     </div>
     {% if t.deleted_count %}

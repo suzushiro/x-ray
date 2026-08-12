@@ -189,6 +189,52 @@ check("不正stateは400",
 check("存在しない投稿は400",
       c.post("/api/tumblr/post", data={"tweet_id": "zzz"}).status_code == 400)
 
+print("\n== タグ変換 ==")
+check("ギャル→girl", web.map_tags(["ギャル"]) == ["girl"], str(web.map_tags(["ギャル"])))
+check("他はそのまま", web.map_tags(["illustrator"]) == ["illustrator"])
+check("混在", web.map_tags(["ギャル", "photographer"]) == ["girl", "photographer"],
+      str(web.map_tags(["ギャル", "photographer"])))
+check("空リスト", web.map_tags([]) == [])
+check("Noneでも落ちない", web.map_tags(None) == [])
+
+# 変換表は環境変数で差し替えられる
+import importlib
+os.environ["TUMBLR_TAG_MAP"] = '{"ギャル":"gal","R18":"nsfw","news":""}'
+importlib.reload(web)
+web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+check("環境変数で上書きできる", web.map_tags(["ギャル"]) == ["gal"], str(web.map_tags(["ギャル"])))
+check("空文字指定でタグから除外", web.map_tags(["news", "art"]) == ["art"],
+      str(web.map_tags(["news", "art"])))
+check("変換後の重複を潰す", web.map_tags(["R18", "nsfw"]) == ["nsfw"],
+      str(web.map_tags(["R18", "nsfw"])))
+
+os.environ["TUMBLR_TAG_MAP"] = "これはJSONではない"
+importlib.reload(web)
+web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+check("不正なJSONでも既定値で動く", web.map_tags(["ギャル"]) == ["girl"],
+      str(web.map_tags(["ギャル"])))
+
+del os.environ["TUMBLR_TAG_MAP"]
+importlib.reload(web)
+web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+c = web.app.test_client()
+
+print("\n== タグがボタンに埋まるか ==")
+import base64 as _b64
+conn = db.get_conn()
+conn.execute("UPDATE accounts SET categories=? WHERE screen_name='alice'",
+             (json.dumps(["ギャル", "illustrator"], ensure_ascii=False),))
+conn.commit(); conn.close()
+html2 = c.get("/").get_data(as_text=True)
+import re as _re
+m = _re.search(r'data-cats="([^"]*)"', html2)
+check("data-cats がある", bool(m))
+if m:
+    decoded = json.loads(_b64.b64decode(m.group(1)).decode("latin1"))
+    check("ギャルがgirlになっている", decoded == ["girl", "illustrator"], str(decoded))
+    check("base64がASCIIのみ（atob安全）",
+          all(ord(ch) < 128 for ch in m.group(1)))
+
 print("\n== UI ==")
 html = c.get("/").get_data(as_text=True)
 check("投稿先セレクトがある", 'id="tmb-account"' in html)
@@ -206,6 +252,8 @@ CALLS.clear()
 r = c.post("/api/tumblr/post", data={"tweet_id": "t1", "state": "published"}).get_json()
 check("publishedで投稿できる", r.get("ok") and r.get("state") == "published", str(r))
 check("ボタンが描画される", html.count('onclick="openTumblrShare') == 1)
+check("キャプション既定に@を付けない",
+      "value = tmbCtx.handle" in html and "`@${tmbCtx.handle}`" not in html)
 
 srv.shutdown()
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
