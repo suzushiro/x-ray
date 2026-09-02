@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from twscrape import API, gather
 from twscrape.logger import set_log_level
 
-from db import get_conn, init_db
+from db import DB_PATH, get_conn, init_db
 from cache_utils import (
     CACHE_DIR,
     IMAGES_DIR,
@@ -544,7 +544,43 @@ def check_egress(verbose: bool = True) -> dict:
     return result
 
 
+def check_db_writable():
+    """
+    データベースに書き込めるか事前に確認する。
+
+    所有者や権限がずれていると SQLite は "database is locked" としか言わず、
+    原因が読み取れない。実際にそれで多重起動が積み上がる事故を起こしたので、
+    起動時にはっきりした文言で落とす。
+    """
+    problems = []
+    for label, path in (("スクレイプ結果", DB_PATH),
+                        ("アカウントプール", TWSCRAPE_DB)):
+        d = os.path.dirname(path) or "."
+        if not os.path.exists(path):
+            if not os.access(d, os.W_OK):
+                problems.append(f"{label}: {d} に作成できません")
+            continue
+        if not os.access(path, os.W_OK):
+            try:
+                st = os.stat(path)
+                own = f"（uid={st.st_uid} gid={st.st_gid} mode={oct(st.st_mode)[-3:]}）"
+            except OSError:
+                own = ""
+            problems.append(f"{label}: {path} に書き込めません{own}")
+
+    if problems:
+        print("[!] データベースに書き込めません:")
+        for p in problems:
+            print(f"    - {p}")
+        print("[!] ホスト側で所有者を直してください:")
+        print("    sudo chown $(id -u):$(id -g) data/*.db*")
+        return False
+    return True
+
+
 async def main():
+    if not check_db_writable():
+        sys.exit(1)
     init_db()
     api = API(TWSCRAPE_DB)
 

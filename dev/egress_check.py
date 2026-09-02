@@ -187,9 +187,11 @@ check(".env 実体が同梱されていない", not (HERE / ".." / ".env").exist
 
 print("\n== 公開ファイルに環境固有の情報が無いか ==")
 # 実ホスト名・実カテゴリ・実監視垢など、公開したくない語
+# ホスト名・IP・実アカウント名など、公開したくない値。
+# カテゴリ名（ギャル等）はタグ変換の設定例として公開ファイルに出てよいので含めない。
 SECRETS = ["epimetheus", "epi1-doc", "epi1-ubu", "jcom", "JCOM", "au光",
            "110.173.240.104", "192.168.0.60", "192.168.1.10",
-           "nullzebra", "nemoto_nagi", "ギャル"]
+           "nullzebra", "nemoto_nagi", "suzushiro.io", "jpegmania"]
 PUBLIC = ["README.md", ".env.example", "docker-compose.yml", ".gitignore",
           "app/scraper.py", "app/web.py", "app/db.py", "app/cache_utils.py",
           "tools/cookie_harvester.py", "tools/accounts.example.txt",

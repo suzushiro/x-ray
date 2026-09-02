@@ -243,6 +243,72 @@ check("投稿ボタンになっている", 'onclick="tmbPost()"' in html)
 check("トグルでstateを切り替える", "checked ? 'draft' : 'published'" in html)
 check("トグルでボタン文言が変わる", "tmbDraftToggled" in html and "下書きに保存" in html)
 
+print("\n== API方式に固定 ==")
+check("シェアツールを開く導線が無い", "widgets/share/tool" not in html)
+check("tmbOpen が残っていない", "function tmbOpen" not in html)
+check("実験トグルが残っていない", 'id="tmb-all"' not in html)
+check("ボタンの条件が tumblr_enabled のみ",
+      "share_enabled or tumblr_enabled" not in
+      (HERE / ".." / "app" / "templates" / "_macros.html").read_text())
+
+print("\n== 複数選択UI ==")
+check("複数選択の器がある", "let tmbSel = []" in html)
+check("全選択リンクがある", 'id="tmb-selall"' in html and "tmbToggleAll" in html)
+check("選択順のバッジがある", "tmb-badge" in html and "String(at + 1)" in html)
+check("既定は全選択", "tmbSel = imgs.map((_, i) => i)" in html)
+check("0枚なら投稿できない", "disabled = tmbSel.length === 0" in html)
+check("選んだ順にindicesを送る", "fd.set('indices', tmbSel.join(','))" in html)
+
+print("\n== 自動下書き ==")
+check("しきい値がテンプレートに渡る", 'data-draft-threshold="3"' in html, )
+check("しきい値以上で下書きにする", "tmbSel.length >= th" in html)
+check("手動操作を尊重する", "tmbDraftTouched" in html and "th <= 0 || tmbDraftTouched" in html)
+check("自動時の説明が出る", "tmb-draft-auto" in html and "枚以上を選んだので下書き" in html)
+
+# しきい値は環境変数で変えられる
+os.environ["TUMBLR_DRAFT_THRESHOLD"] = "2"
+importlib.reload(web)
+web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+check("しきい値を環境変数で変更できる", web.TUMBLR_DRAFT_THRESHOLD == 2,
+      str(web.TUMBLR_DRAFT_THRESHOLD))
+html2 = web.app.test_client().get("/").get_data(as_text=True)
+check("変更がテンプレートに反映される", 'data-draft-threshold="2"' in html2)
+
+os.environ["TUMBLR_DRAFT_THRESHOLD"] = "0"
+importlib.reload(web)
+web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+check("0なら自動化しない設定にできる", web.TUMBLR_DRAFT_THRESHOLD == 0)
+
+os.environ["TUMBLR_DRAFT_THRESHOLD"] = "abc"
+importlib.reload(web)
+web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+check("不正値でも既定3で動く", web.TUMBLR_DRAFT_THRESHOLD == 3,
+      str(web.TUMBLR_DRAFT_THRESHOLD))
+del os.environ["TUMBLR_DRAFT_THRESHOLD"]
+importlib.reload(web)
+web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+c = web.app.test_client()
+
+print("\n== indices の順序保持 ==")
+CALLS.clear()
+r = c.post("/api/tumblr/post", data={"tweet_id": "t1", "indices": "1,0"}).get_json()
+check("2枚とも送られる", r.get("count") == 2, str(r))
+body = CALLS[0]["body"]
+# data[0] に2枚目(b.jpg)、data[1] に1枚目(a.jpg) が来るはず
+i0 = body.index(b'name="data[0]"')
+i1 = body.index(b'name="data[1]"')
+seg0 = body[i0:i1]
+check("選んだ順で添付される（1枚目に b.jpg）", b"b.jpg" in seg0, str(seg0[:120]))
+
+CALLS.clear()
+r = c.post("/api/tumblr/post", data={"tweet_id": "t1", "indices": "0,0,1"}).get_json()
+check("重複indicesを潰す", r.get("count") == 2, str(r))
+
+check("空のindicesは400",
+      c.post("/api/tumblr/post", data={"tweet_id": "t1", "indices": " , "}).status_code == 400)
+check("範囲外indicesは弾く",
+      c.post("/api/tumblr/post", data={"tweet_id": "t1", "indices": "99"}).status_code == 400)
+
 print("\n== 下書き投稿 ==")
 CALLS.clear()
 r = c.post("/api/tumblr/post", data={"tweet_id": "t1", "state": "draft"}).get_json()

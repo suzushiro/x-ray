@@ -210,33 +210,29 @@ print('MODAL' if 'id=\"tmb\"' in h else 'NOMODAL')
 env = dict(os.environ)
 env["PUBLIC_SHARE_BASE_URL"] = "https://share.example.com"
 env["SHARE_TOKEN_TTL_MIN"] = "60"
+# 投稿ボタンはAPI方式（Tumblr設定あり）のときだけ出るので、その状態を作る
+_acc = BASE + "/tumblr_accounts.json"
+with open(_acc, "w", encoding="utf-8") as _f:
+    json.dump({"accounts": [{"label": "main", "blog": "b",
+                             "token": "t", "secret": "s"}]}, _f)
+env["TUMBLR_ACCOUNTS_FILE"] = _acc
+env["TUMBLR_CONSUMER_KEY"] = "ck"
+env["TUMBLR_CONSUMER_SECRET"] = "cs"
 r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env)
 out = r.stdout
 import re as _re2
 _m = _re2.search(r"BTNCOUNT=(\d+)", out)
 _n = int(_m.group(1)) if _m else 0
-check("ローカル画像ありにボタンが出る（1件につき1個）", _n >= 1,
+check("ローカル画像あり＋Tumblr設定済みでボタンが出る", _n >= 1,
       f"count={_n} {r.stderr[-100:]}")
-check("共有モーダルがある", "MODAL" in out and "NOMODAL" not in out)
+check("投稿モーダルがある", "MODAL" in out and "NOMODAL" not in out)
 
-print("\n== Tumblrへ渡すパラメータ ==")
+# 投稿UIはAPI方式に固定したため、シェアツール方式のUI検証は廃止した。
+# /share 系エンドポイント自体は（外部プレビュー用途に）残っているので上で検証している。
+print("\n== 投稿UIはAPI方式に固定されている ==")
 js = (HERE / ".." / "app" / "templates" / "_scripts.html").read_text()
-check("posttype=photo を渡す", "params.set('posttype', 'photo')" in js)
-check("content に画像URLを渡す", "params.set('content'" in js and "image_urls" in js)
-check("canonicalUrl は元投稿", "params.set('canonicalUrl', srcUrl)" in js)
-check("キャプションを元投稿へのリンクにする", '<a href="${srcUrl}">' in js)
-check("共有ドメインを canonicalUrl にしていない", "canonicalUrl', data.share_url" not in js)
-
-print("\n== 複数枚時は1枚だけ渡す ==")
-check("既定は選択した1枚のみ", "urls[Math.min(tmbSelected" in js)
-check("join(',') は実験モードのみ", "if (tmbSendAll) {" in js and "urls.join(',')" in js)
-check("サムネが選択UIになっている", "tmbSelected = i;" in js and "'selected'" in js)
-check("複数枚のときだけ注記を出す", "tmbUpdateModeUI" in js and "multi &&" in js)
-check("画像0枚なら中断する", "画像URLが取得できませんでした" in js)
-css = (HERE / ".." / "app" / "templates" / "_style.html").read_text()
-check("選択中のスタイルがある", ".tmb-imgs img.selected" in css)
-check("全枚数モードの見た目がある", ".tmb-imgs.all-mode img" in css)
-check("CSSが</style>の内側", css.rstrip().endswith("</style>"))
+check("シェアツールを開く関数が無い", "widgets/share/tool" not in js)
+check("投稿ボタンはtmbPost", 'onclick="tmbPost()"' in js)
 
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
 sys.exit(1 if fails else 0)

@@ -110,6 +110,32 @@ check("引数なしで環境変数(7日)を使う", count() == 15, f"{count()}�
 conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
 check("空でも落ちない", scraper.prune_scrape_log() == 0)
 
+print("\n== DB書き込みチェック ==")
+check("関数がある", hasattr(scraper, "check_db_writable"))
+check("書ける状態ならTrue", scraper.check_db_writable() is True)
+
+# 書けない状態を作って検出できるか（root環境ではchmodが効かないので条件付き）
+import stat as _stat
+_p = os.environ["DB_PATH"]
+_mode = os.stat(_p).st_mode
+try:
+    os.chmod(_p, 0o444)
+    if not os.access(_p, os.W_OK):
+        check("書けないとFalse", scraper.check_db_writable() is False)
+    else:
+        print("    (root実行のため書き込み不可を再現できず。スキップ)")
+finally:
+    os.chmod(_p, _mode)
+check("戻した後はTrue", scraper.check_db_writable() is True)
+
+print("\n== 多重起動防止 ==")
+_df = (HERE / ".." / "Dockerfile.worker").read_text()
+check("スクレイプに flock -n", "flock -n /tmp/scraper.lock" in _df)
+check("キャッシュ削除にも flock -n", "flock -n /tmp/cache_cleanup.lock" in _df)
+check("起動時の初回実行もロックを取る",
+      "python db.py && flock -n /tmp/scraper.lock python scraper.py" in _df)
+check("flock が入る util-linux を導入", "util-linux" in _df)
+
 print("\n== 環境変数の読み取り ==")
 check("SCRAPE_LOG_RETENTION_DAYS を読む", scraper.SCRAPE_LOG_RETENTION_DAYS == 7,
       str(scraper.SCRAPE_LOG_RETENTION_DAYS))

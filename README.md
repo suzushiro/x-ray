@@ -92,6 +92,39 @@ http://<サーバーのIP>:<WEB_PORT>   # WEB_PORT の既定は 8501
 
 投稿一覧が表示されて、カテゴリタブが切り替えられればセットアップ完了。
 
+## 多重起動の防止
+
+cron のスクレイプは `flock -n` で保護している。前回の実行がまだ終わっていなければ
+その回はスキップされる。
+
+これが無いと、1回の実行が詰まったときに15分ごとにプロセスが積み上がり、
+SQLite が `database is locked` で全滅する（実際に35重起動まで積んだことがある）。
+
+所要時間の目安は 87アカウントで約5分半。15分間隔には収まっている。
+増やす場合は `docker compose exec worker python -c "
+import subprocess, time; t=time.time(); subprocess.run(['python','scraper.py']);
+print(time.time()-t)"` で測っておくとよい。
+
+### database is locked が出たら
+
+まず所有者を疑う。`docker compose run` を使うと root でファイルが作られることがあり、
+以降 worker が書けなくなる。
+
+```bash
+ls -la data/*.db*                              # 所有者を確認
+sudo chown $(id -u):$(id -g) data/*.db*        # ずれていたら直す
+docker compose restart worker
+```
+
+スクレイプ開始時に書き込み可否を検査しているので、権限がずれていれば
+`database is locked` ではなく明示的なメッセージで停止する。
+
+コンテナ内の実行中プロセスは以下で確認できる（`ps` は入っていない）。
+
+```bash
+docker compose exec worker sh -c 'ls /proc/[0-9]*/cmdline | while read f; do tr "\0" " " < $f; echo; done | grep scraper'
+```
+
 ## 運用Tips
 
 - **ログ確認**: `docker exec -it x-ray-worker tail -f /var/log/scraper.log`
@@ -353,8 +386,15 @@ python tumblr_auth.py --list --out ../data/tumblr_accounts.json         # 確認
 
 ### 使い方
 
-投稿カードの `t` ボタン → 確認画面で投稿先・キャプション・タグを決めて「投稿する」。
-「下書きとして投稿する」をONにすると公開せずTumblrの下書きに入る（ボタンは「下書きに保存」に変わる）。
+投稿カードの `t` ボタン → 確認画面で画像・投稿先・キャプション・タグを決めて「投稿する」。
+
+- **画像は複数選べる。** 既定で全選択。サムネのクリックで個別に外せる。
+  バッジの数字はTumblrに添付される順序（選んだ順）
+- 「全解除 / 全選択」でまとめて切り替えられる
+- **一定枚数以上を選ぶと自動的に下書きになる**（既定3枚、`TUMBLR_DRAFT_THRESHOLD` で変更）。
+  枚数の多い投稿を一旦人の目に通すための安全弁。チェックを手で操作すれば
+  以降その投稿では自動判定しない
+- 「下書きとして投稿する」がONだとボタンは「下書きに保存」に変わる
 出典はXの元投稿になる。
 
 センシティブな画像をサブに投げてメインからリブログする運用なら、
@@ -377,10 +417,15 @@ TUMBLR_TAG_MAP={"ギャル":"girl","R18":"nsfw","news":""}
 - `TUMBLR_CONSUMER_KEY` が未設定なら投稿機能は無効になり、
   下記の共有リンク方式（トンネル経由）にフォールバックする
 
-## Tumblr共有（トンネル方式 / フォールバック）
+## Tumblr共有（トンネル方式 / 旧方式）
 
-API投稿が使えない場合の代替。Tumblrのシェアツールを開く方式で、
-Tumblrのサーバーから画像を取得させるため外部公開が必要。
+**投稿UIはAPI方式に固定したので、通常この方式は使わない。**
+`/share` 系のエンドポイントは単一投稿のOGPプレビュー用途として残してあるが、
+投稿ボタンからは呼ばれない（`TUMBLR_CONSUMER_KEY` 未設定だとボタン自体が出ない）。
+
+Tumblrのシェアツールは複数枚の自動添付をやめており、API方式なら
+外部公開なしで複数枚を送れるため、こちらに一本化した。
+cloudflared / トンネルはTumblr投稿のためには不要になっている。
 
 
 

@@ -433,17 +433,34 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 .tmb-x { margin-left: auto; color: var(--text-dim); font-size: 20px; cursor: pointer; }
 .tmb-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
 .tmb-label { color: var(--text-dim); font-size: 12px; margin-bottom: 6px; }
-/* プレビューは「どの1枚を添付するか」の選択UIを兼ねる */
+/* プレビューは「どの画像を添付するか」の複数選択UIを兼ねる。
+   バッジの数字はTumblrに送る順序（選んだ順）を表す。 */
+.tmb-imgs-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.tmb-imgs-head .tmb-label { margin-bottom: 0; }
+.tmb-selall {
+    margin-left: auto; font-size: 12px; color: #1d9bf0;
+    text-decoration: none; cursor: pointer;
+}
+.tmb-selall:hover { text-decoration: underline; }
 .tmb-imgs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
-.tmb-imgs img {
-    height: 84px; border-radius: 6px; object-fit: cover; flex: none;
-    cursor: pointer; border: 2px solid transparent; opacity: .55;
+.tmb-cell { position: relative; flex: none; cursor: pointer; }
+.tmb-cell img {
+    height: 84px; border-radius: 6px; object-fit: cover; display: block;
+    border: 2px solid transparent; opacity: .4;
     transition: opacity .1s, border-color .1s;
 }
-.tmb-imgs img:hover { opacity: .85; }
-.tmb-imgs img.selected { opacity: 1; border-color: #1d9bf0; }
-/* 全枚数モードでは1枚選択が無意味なので選択の見た目を消す */
-.tmb-imgs.all-mode img { opacity: 1; border-color: transparent; cursor: default; }
+.tmb-cell:hover img { opacity: .75; }
+.tmb-cell.selected img { opacity: 1; border-color: #1d9bf0; }
+.tmb-badge {
+    position: absolute; top: 4px; left: 4px;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #1d9bf0; color: #fff; font-size: 11px; font-weight: 700;
+    display: none; align-items: center; justify-content: center;
+}
+.tmb-cell.selected .tmb-badge { display: flex; }
+.tmb-note.warn {
+    background: #3a2a12; border-color: #6b4b16; color: #ffd08a;
+}
 .tmb-check {
     display: flex; align-items: center; gap: 6px; margin: 6px 0 0;
     font-size: 12px; color: var(--text-dim); cursor: pointer; user-select: none;

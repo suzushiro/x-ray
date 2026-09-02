@@ -49,6 +49,16 @@ def map_tags(categories):
     return out
 
 
+# これ以上の枚数を選んだら自動的に下書きにする。
+# センシティブ寄りの投稿をまとめて公開すると凍結リスクが上がるため、
+# 枚数が多いときは一旦下書きに置いて人の目を通す運用に寄せる。
+# 0 以下にすると自動化しない。
+try:
+    TUMBLR_DRAFT_THRESHOLD = int(os.environ.get("TUMBLR_DRAFT_THRESHOLD", "3") or 3)
+except ValueError:
+    print("[!] TUMBLR_DRAFT_THRESHOLD が数値ではありません（既定の3を使います）")
+    TUMBLR_DRAFT_THRESHOLD = 3
+
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
 SHARE_TOKEN_TTL_MIN = int(os.environ.get("SHARE_TOKEN_TTL_MIN", "60") or 60)
@@ -87,8 +97,11 @@ def _restrict_public_host():
 def _inject_share_flag():
     # 全テンプレートで share_enabled を参照できるようにする
     return {
+        # /share 系ルートの有無だけを表す。投稿UIはAPI方式に固定したので
+        # ボタンの表示条件には使わない。
         "share_enabled": bool(PUBLIC_SHARE_BASE_URL),
         "tumblr_enabled": tumblr_client.is_configured(),
+        "tumblr_draft_threshold": TUMBLR_DRAFT_THRESHOLD,
     }
 
 
@@ -754,11 +767,19 @@ def share_image(token, idx):
 def _local_image_paths(tweet_id, conn, indices=None):
     """
     投稿に紐づくローカル画像の実ファイルパスを返す。
-    削除済み・ローカル未保存は除外する。indices を渡すとその添字だけに絞る。
+    削除済み・ローカル未保存は除外する。
+
+    indices（添字のリスト）を渡すとその添字だけに絞り、
+    **渡された順序どおり**に返す。UI側が選んだ順に番号を振って見せているため、
+    その順序をそのままTumblrへの添付順にする。
     """
     names = _share_images_for(tweet_id, conn)
     if indices is not None:
-        names = [n for i, n in enumerate(names) if i in indices]
+        picked = []
+        for i in indices:
+            if 0 <= i < len(names) and names[i] not in picked:
+                picked.append(names[i])
+        names = picked
     paths = []
     for n in names:
         for d in (IMAGES_DIR, CACHE_DIR):
@@ -804,9 +825,21 @@ def api_tumblr_post():
     indices = None
     if raw_idx:
         try:
-            indices = {int(x) for x in raw_idx.split(",") if x.strip() != ""}
+            # 重複は潰しつつ、渡された順序は保つ（添付順になる）
+            seen = set()
+            indices = []
+            for x in raw_idx.split(","):
+                x = x.strip()
+                if x == "":
+                    continue
+                n = int(x)
+                if n not in seen:
+                    seen.add(n)
+                    indices.append(n)
         except ValueError:
             return jsonify({"ok": False, "error": "indicesが不正です"}), 400
+        if not indices:
+            return jsonify({"ok": False, "error": "画像が選択されていません"}), 400
 
     conn = db()
     paths = _local_image_paths(tweet_id, conn, indices)

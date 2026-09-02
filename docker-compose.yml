@@ -62,6 +62,7 @@ services:
       TUMBLR_CONSUMER_SECRET: "${TUMBLR_CONSUMER_SECRET:-}"
       TUMBLR_ACCOUNTS_FILE: "${TUMBLR_ACCOUNTS_FILE:-/data/tumblr_accounts.json}"
       TUMBLR_TAG_MAP: "${TUMBLR_TAG_MAP:-}"
+      TUMBLR_DRAFT_THRESHOLD: "${TUMBLR_DRAFT_THRESHOLD:-3}"
       SHARE_TOKEN_TTL_MIN: "${SHARE_TOKEN_TTL_MIN:-60}"
     # web はスクレイピングしないのでproxyは設定しない
     depends_on:
