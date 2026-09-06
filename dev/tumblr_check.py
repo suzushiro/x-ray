@@ -235,6 +235,50 @@ if m:
     check("base64がASCIIのみ（atob安全）",
           all(ord(ch) < 128 for ch in m.group(1)))
 
+print("\n== ブックマークからの投稿 ==")
+conn = db.get_conn()
+conn.execute("DELETE FROM bookmarks")
+# (a) tweets にも存在する投稿
+conn.execute("""INSERT INTO bookmarks (tweet_id,screen_name,display_name,content,
+             created_at,url,media_json,local_media_json,categories,bookmarked_at)
+             VALUES ('t1','alice','Alice','x','2026-01-01T00:00:00+00:00',
+             'https://x.com/alice/status/t1',?,?,?,'x')""",
+             (json.dumps(["https://p/a.jpg", "https://p/b.jpg"]),
+              json.dumps(["/images/a.jpg", "/images/b.jpg"]),
+              json.dumps(["illustrator"])))
+# (b) tweets には無く、ブックマークにだけ残っている投稿
+conn.execute("""INSERT INTO bookmarks (tweet_id,screen_name,display_name,content,
+             created_at,url,media_json,local_media_json,categories,bookmarked_at)
+             VALUES ('bmonly','bob','Bob','y','2026-01-01T00:00:00+00:00',
+             'https://x.com/bob/status/bmonly',?,?,?,'x')""",
+             (json.dumps(["https://p/a.jpg"]),
+              json.dumps(["/images/a.jpg"]),
+              json.dumps(["ギャル"])))
+conn.commit()
+conn.close()
+
+bm = c.get("/bookmarks").get_data(as_text=True)
+check("ブックマークにボタンが出る", bm.count('onclick="openTumblrShare') == 2,
+      str(bm.count('onclick="openTumblrShare')))
+check("投稿モーダルも出る", 'id="tmb"' in bm)
+
+# タグ変換もトップページと同じように効く
+import base64 as _b64, re as _re3
+_cats = _re3.findall(r'data-cats="([^"]+)"', bm)
+_decoded = [json.loads(_b64.b64decode(x).decode("latin1")) for x in _cats if x]
+check("カテゴリがタグとして渡る", ["illustrator"] in _decoded, str(_decoded))
+check("ブックマークでもギャル→girl変換", ["girl"] in _decoded, str(_decoded))
+
+CALLS.clear()
+r = c.post("/api/tumblr/post", data={"tweet_id": "t1", "account": "main"}).get_json()
+check("ブックマーク済み投稿を投稿できる", r.get("ok") and r.get("count") == 2, str(r))
+
+CALLS.clear()
+r = c.post("/api/tumblr/post", data={"tweet_id": "bmonly", "account": "sub"}).get_json()
+check("tweetsに無い投稿でも投稿できる", r.get("ok") and r.get("count") == 1, str(r))
+check("出典がブックマークのURLになる",
+      b"https://x.com/bob/status/bmonly" in CALLS[0]["body"])
+
 print("\n== UI ==")
 html = c.get("/").get_data(as_text=True)
 check("投稿先セレクトがある", 'id="tmb-account"' in html)

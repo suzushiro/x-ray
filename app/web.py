@@ -635,6 +635,12 @@ def _share_images_for(tweet_id, conn):
         "SELECT media_json, local_media_json FROM tweets WHERE tweet_id=?",
         (tweet_id,)).fetchone()
     if not row:
+        # ブックマークにしか残っていない投稿（元ツイートが削除された等）も
+        # 投稿できるようにフォールバックする。
+        row = conn.execute(
+            "SELECT media_json, local_media_json FROM bookmarks WHERE tweet_id=?",
+            (tweet_id,)).fetchone()
+    if not row:
         return []
     try:
         media = json.loads(row["media_json"] or "[]")
@@ -847,6 +853,9 @@ def api_tumblr_post():
         return jsonify({"ok": False, "error": "投稿できるローカル画像がありません"}), 400
 
     row = conn.execute("SELECT url FROM tweets WHERE tweet_id=?", (tweet_id,)).fetchone()
+    if not row:
+        row = conn.execute("SELECT url FROM bookmarks WHERE tweet_id=?",
+                           (tweet_id,)).fetchone()
     source_url = row["url"] if row else ""
 
     caption = (request.form.get("caption") or "").strip()
@@ -926,6 +935,16 @@ def bookmarks():
         d["media_idx"] = media_idx
         d["deleted_count"] = deleted_count
         d["media_b64"] = base64.b64encode(json.dumps(display_imgs).encode()).decode() if display_imgs else ""
+
+        # Tumblr投稿ボタン用。トップページ(format_tweet)と同じ情報を持たせる。
+        d["has_local_media"] = any(
+            (d["local_media"][i] if i < len(d["local_media"]) else None)
+            for i, remote in enumerate(d["media"]) if remote not in deleted
+        )
+        _tags = map_tags(d["categories_list"])
+        d["categories_b64"] = base64.b64encode(
+            json.dumps(_tags).encode()).decode() if _tags else ""
+
         try:
             dt_jst = datetime.fromisoformat(d["created_at"].replace("Z", "+00:00")).astimezone(JST)
             d["created_at_jst"] = dt_jst.strftime("%Y-%m-%d %H:%M")
