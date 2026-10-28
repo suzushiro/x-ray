@@ -19,6 +19,7 @@
     th { color: #8b98a5; font-weight: normal; }
     .ok { color: #00ba7c; }
     .error { color: #f4212e; }
+    .warn { color: #ffd400; }
 </style>
 </head>
 <body>
@@ -43,7 +44,7 @@
     {% for l in logs %}
     <tr>
         <td>{{ l.run_at[:19].replace('T', ' ') }}</td>
-        <td>@{{ l.screen_name }}</td>
+        <td>{% if l.screen_name == '__egress__' %}🌐 出口IP{% else %}@{{ l.screen_name }}{% endif %}</td>
         <td class="{{ l.status }}">{{ l.status }}</td>
         <td>{{ l.new_tweets }}</td>
         <td>{{ l.message }}</td>

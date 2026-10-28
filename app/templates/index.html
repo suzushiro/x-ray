@@ -23,6 +23,13 @@
             全{{ total_count }}件
             {% if last_run_jst %} ・ 最終更新: {{ last_run_jst }}{% endif %}
         </div>
+        {% if egress_alert %}
+        <div class="health {% if egress_alert.status == 'error' %}health-error{% else %}health-warn{% endif %}">
+            {% if egress_alert.status == 'error' %}🛑 取得停止（回線分離）{% else %}⚠️ 回線の出口IPが変わりました{% endif %}:
+            <span class="health-account">{{ egress_alert.message }}</span>
+            ・ <a href="/status" class="health-link">詳細 →</a>
+        </div>
+        {% endif %}
         {% if health %}
         {% set has_error = error_accounts|length > 0 %}
         <div class="health {% if has_error %}health-warn{% else %}health-ok{% endif %}">

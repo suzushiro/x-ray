@@ -45,8 +45,13 @@ threading.Thread(target=fake_server, args=(8878, b"203.0.113.9"), daemon=True).s
 time.sleep(0.5)
 
 
-def run_check(expected, ip_port, extra_env=None):
-    """check_egress を子プロセスで動かす。ipify のURLを差し替えて実測する。"""
+def run_check(expected, proxied_ip, direct_ip=None, direct_fail=False,
+              proxy="http://127.0.0.1:8877"):
+    """本物の check_egress を動かす。IP問い合わせだけ差し替えて判定を試す。
+
+    以前はここで check_egress の中身を書き写していたが、それでは
+    本体のロジックを一切テストできていなかったので実物を呼ぶ形にした。
+    """
     env = dict(os.environ)
     env.update({
         "DB_PATH": "/tmp/xeg/data.db", "IMAGES_DIR": "/tmp/xeg/images",
@@ -54,34 +59,24 @@ def run_check(expected, ip_port, extra_env=None):
         "ACCOUNTS_JSON_PATH": "/tmp/xeg/a.json", "TWSCRAPE_DB": "/tmp/xeg/pool.db",
         "EXPECTED_EGRESS_IP": expected,
     })
-    if extra_env:
-        env.update(extra_env)
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        env.pop(k, None)
+    if proxy:
+        env["HTTPS_PROXY"] = proxy
     code = f'''
 import sys, json
 sys.path.insert(0, {str(APP)!r})
 import scraper
-scraper.check_egress.__globals__["urllib"].request  # 参照確認
-# 問い合わせ先をダミーに差し替える
-src = scraper.check_egress
-import types
-orig = src.__code__
-def patched(verbose=True):
-    import os, urllib.request
-    result = {{"ok": False, "ip": None, "expected": scraper.EXPECTED_EGRESS_IP,
-               "proxy": os.environ.get("HTTPS_PROXY","")}}
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:{ip_port}/", timeout=5) as r:
-            result["ip"] = r.read().decode().strip()
-    except Exception as e:
-        result["error"] = str(e)
-        print(json.dumps(result)); return result
-    if not scraper.EXPECTED_EGRESS_IP:
-        result["ok"] = True
-    else:
-        result["ok"] = result["ip"] == scraper.EXPECTED_EGRESS_IP
-    print(json.dumps(result))
-    return result
-print("MARK", json.dumps(patched(False)))
+
+def fake(use_proxy=True, timeout=15):
+    if use_proxy:
+        return {proxied_ip!r}, None
+    if {direct_fail!r}:
+        return None, "TimeoutError: dummy"
+    return {direct_ip!r}, None
+
+scraper._fetch_global_ip = fake
+print("MARK", json.dumps(scraper.check_egress(False)))
 '''
     r = subprocess.run([sys.executable, "-c", code], capture_output=True,
                        env=env, timeout=30, text=True)
@@ -89,19 +84,155 @@ print("MARK", json.dumps(patched(False)))
     for line in r.stdout.splitlines():
         if line.startswith("MARK "):
             return json.loads(line[5:])
-    return {"ok": False, "error": r.stderr[-300:]}
+    return {"ok": False, "error": r.stderr[-400:]}
 
 
 os.makedirs("/tmp/xeg", exist_ok=True)
 
 print("== 出口IPの照合 ==")
-r = run_check("203.0.113.10", 8877)
-check("想定どおりなら ok", r.get("ok") is True, str(r))
-r = run_check("203.0.113.10", 8878)
-check("違うIPなら ok=False", r.get("ok") is False, str(r))
+r = run_check("203.0.113.10", "203.0.113.10")
+check("想定どおりなら ok", r.get("ok") is True and r.get("verdict") == "match", str(r))
+
+r = run_check("", "203.0.113.9")
+check("EXPECTED未設定なら照合しない",
+      r.get("ok") is True and r.get("verdict") == "unchecked", str(r))
+
+r = run_check("203.0.113.10", None)
+check("IPが取れなければ止める",
+      r.get("ok") is False and r.get("verdict") == "unreachable", str(r))
+
+print("\n== 想定と違ったときの切り分け ==")
+# proxy経由と直接の出口が違う＝分離は効いている。回線のIPが変わっただけ。
+r = run_check("203.0.113.10", "203.0.113.9", direct_ip="198.51.100.7")
+check("proxyが効いていれば続行する",
+      r.get("ok") is True and r.get("verdict") == "proxy_ip_changed", str(r))
 check("実際のIPを報告する", r.get("ip") == "203.0.113.9", str(r.get("ip")))
-r = run_check("", 8878)
-check("EXPECTED未設定なら照合しない", r.get("ok") is True, str(r))
+check("直接の出口も報告する", r.get("direct_ip") == "198.51.100.7", str(r))
+
+# proxy経由と直接が同じ＝迂回している。これは本物の漏れなので止める。
+r = run_check("203.0.113.10", "198.51.100.7", direct_ip="198.51.100.7")
+check("proxyを迂回していたら止める",
+      r.get("ok") is False and r.get("verdict") == "proxy_bypassed", str(r))
+
+# proxy環境変数そのものが無い＝分離されていない。
+r = run_check("203.0.113.10", "198.51.100.7", direct_ip="198.51.100.7", proxy="")
+check("proxy未設定で不一致なら止める",
+      r.get("ok") is False and r.get("verdict") == "proxy_bypassed", str(r))
+
+# 直接の出口が取れない＝判定できない。安全側に倒して止める。
+r = run_check("203.0.113.10", "203.0.113.9", direct_fail=True)
+check("判定できなければ止める",
+      r.get("ok") is False and r.get("verdict") == "undetermined", str(r))
+
+print("\n== scrape_log への記録 ==")
+def run_log(verdict_case):
+    """log_egress が scrape_log に残すかを実DBで確かめる。"""
+    import json, shutil
+    shutil.rmtree("/tmp/xeglog", ignore_errors=True)
+    os.makedirs("/tmp/xeglog", exist_ok=True)
+    env = dict(os.environ)
+    env.update({
+        "DB_PATH": "/tmp/xeglog/data.db", "IMAGES_DIR": "/tmp/xeglog/images",
+        "CACHE_DIR": "/tmp/xeglog/cache", "TWITTER_COOKIES_FILE": "/tmp/xeglog/c.txt",
+        "ACCOUNTS_JSON_PATH": "/tmp/xeglog/a.json", "TWSCRAPE_DB": "/tmp/xeglog/pool.db",
+        "EXPECTED_EGRESS_IP": "203.0.113.10",
+    })
+    code = f'''
+import sys, json, sqlite3
+sys.path.insert(0, {str(APP)!r})
+import db, scraper
+db.init_db()
+scraper.log_egress({verdict_case!r})
+c = sqlite3.connect("/tmp/xeglog/data.db")
+rows = c.execute("SELECT screen_name, status, message FROM scrape_log").fetchall()
+print("MARK", json.dumps(rows))
+'''
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       env=env, timeout=60, text=True)
+    for line in r.stdout.splitlines():
+        if line.startswith("MARK "):
+            return json.loads(line[5:])
+    return [["ERR", r.stderr[-400:], ""]]
+
+rows = run_log({"verdict": "match", "ok": True, "reason": "x"})
+check("正常時は書かない", rows == [], str(rows))
+rows = run_log({"verdict": "proxy_ip_changed", "ok": True, "reason": "IPが変わった"})
+check("続行した警告は warn で残る",
+      len(rows) == 1 and rows[0][0] == "__egress__" and rows[0][1] == "warn", str(rows))
+rows = run_log({"verdict": "proxy_bypassed", "ok": False, "reason": "迂回"})
+check("中止は error で残る",
+      len(rows) == 1 and rows[0][1] == "error", str(rows))
+
+print("\n== Web画面に出るか ==")
+wb = (APP / "web.py").read_text()
+check("web.py が出口ログを引く", "egress_alert" in wb)
+check("アカウント一覧から擬似名を除く",
+      "screen_name != ?" in wb and "EGRESS_LOG_NAME" in wb)
+idx = (APP / "templates" / "index.html").read_text()
+check("index.html が専用バナーを出す", "egress_alert" in idx)
+check("中止と警告を描き分ける", "health-error" in idx)
+st = (APP / "templates" / "_style.html").read_text()
+check("health-error のCSSがある", ".health-error" in st)
+
+print("\n== 実際に画面に出るか（レンダリング）==")
+# 文字列grepだけでは足りない。マクロの with context 漏れを一度それで見逃したので、
+# 本物の Flask にダミーDBを食わせて HTML を描かせて確かめる。
+def render_index(egress_row):
+    """egress_row=(status, message) を scrape_log に入れて / を描画する。"""
+    import json, shutil
+    shutil.rmtree("/tmp/xegweb", ignore_errors=True)
+    os.makedirs("/tmp/xegweb", exist_ok=True)
+    env = dict(os.environ)
+    env.update({
+        "DB_PATH": "/tmp/xegweb/data.db", "IMAGES_DIR": "/tmp/xegweb/images",
+        "CACHE_DIR": "/tmp/xegweb/cache", "TWITTER_COOKIES_FILE": "/tmp/xegweb/c.txt",
+        "ACCOUNTS_JSON_PATH": "/tmp/xegweb/a.json", "TWSCRAPE_DB": "/tmp/xegweb/pool.db",
+    })
+    ins = ""
+    if egress_row:
+        ins = (f'''
+import sqlite3
+from datetime import datetime, timezone
+c = sqlite3.connect("/tmp/xegweb/data.db")
+c.execute("INSERT INTO scrape_log (run_at, screen_name, status, message, new_tweets)"
+          " VALUES (?,?,?,?,0)",
+          (datetime.now(timezone.utc).isoformat(), "__egress__",
+           {egress_row[0]!r}, {egress_row[1]!r}))
+c.commit(); c.close()
+''')
+    code = f'''
+import sys, subprocess, os
+sys.path.insert(0, {str(HERE)!r})
+sys.path.insert(0, {str(APP)!r})
+subprocess.run([sys.executable, {str(HERE / "seed_dummy.py")!r}],
+               check=True, capture_output=True)
+{ins}
+from web import app
+html = app.test_client().get("/").get_data(as_text=True)
+print("MARKLEN", len(html))
+open("/tmp/xegweb/out.html", "w").write(html)
+'''
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       env=env, timeout=180, text=True)
+    if "MARKLEN" not in r.stdout:
+        return "ERROR: " + r.stderr[-500:]
+    return open("/tmp/xegweb/out.html").read()
+
+
+html = render_index(("error", "proxyを迂回しています（テスト用の文言）"))
+check("中止バナーが出る", "🛑 取得停止（回線分離）" in html, html[:200])
+check("理由がそのまま読める", "proxyを迂回しています（テスト用の文言）" in html)
+check("強調スタイルが当たる", "health-error" in html)
+check("擬似アカウント名を表に出さない", "@__egress__" not in html)
+
+html = render_index(("warn", "回線側の出口IPが変わりました（テスト用の文言）"))
+check("警告バナーが出る", "⚠️ 回線の出口IPが変わりました" in html, html[:200])
+check("警告では取得停止と言わない", "🛑 取得停止（回線分離）" not in html)
+check("擬似アカウント名を表に出さない（警告時）", "@__egress__" not in html)
+
+html = render_index(None)
+check("正常時はバナーを出さない",
+      "取得停止（回線分離）" not in html and "回線の出口IPが変わりました" not in html)
 
 print("\n== proxy環境変数が両ライブラリで効くか（実測）==")
 
@@ -222,6 +353,8 @@ sc = (APP / "scraper.py").read_text()
 check("check-egress サブコマンドがある", '"check-egress"' in sc)
 check("スクレイプ前に自動チェックする", 'if EXPECTED_EGRESS_IP:' in sc and "中止します" in sc)
 check("失敗時は exit 1", "sys.exit(1)" in sc)
+check("clear-egress-log サブコマンドがある", '"clear-egress-log"' in sc)
+check("迂回時だけ止める文言", "分離が確認できないため" in sc)
 
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
 sys.exit(1 if fails else 0)

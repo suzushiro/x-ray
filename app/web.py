@@ -142,6 +142,10 @@ DB_PATH = os.environ.get("DB_PATH", "/data/data.db")
 # IMAGES_DIR(永続) / CACHE_DIR(表示用) は cache_utils で定義
 PER_PAGE = 100  # ページネーション件数
 
+# scraper.py が出口（回線分離）の状態を scrape_log に残すときの擬似アカウント名。
+# アカウント一覧には出さず、専用のバナーで扱う。
+EGRESS_LOG_NAME = "__egress__"
+
 
 def get_categories():
     """最新のカテゴリ一覧を返す（accounts.jsonから動的取得）"""
@@ -350,16 +354,26 @@ def index():
     """).fetchone()
 
     # エラーが続いてるアカウントを抽出（直近3回全部errorのもの）
+    # __egress__ は擬似アカウント名なのでアカウント一覧からは除く。
     error_accounts = conn.execute("""
         SELECT screen_name, COUNT(*) as err_count
         FROM scrape_log
         WHERE status = 'error'
+          AND screen_name != ?
           AND run_at > datetime('now', '-3 hours')
         GROUP BY screen_name
         HAVING err_count >= 2
         ORDER BY err_count DESC
         LIMIT 5
-    """).fetchall()
+    """, (EGRESS_LOG_NAME,)).fetchall()
+
+    # 出口（回線分離）の異常。ログファイルにしか出ないと気づけないので画面に出す。
+    egress_alert = conn.execute("""
+        SELECT status, message, run_at FROM scrape_log
+        WHERE screen_name = ?
+          AND run_at > datetime('now', '-12 hours')
+        ORDER BY run_at DESC LIMIT 1
+    """, (EGRESS_LOG_NAME,)).fetchone()
 
 
     tweets = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
@@ -392,6 +406,7 @@ def index():
         last_run_jst=last_run_jst,
         health=dict(health) if health else None,
         error_accounts=[dict(a) for a in error_accounts],
+        egress_alert=dict(egress_alert) if egress_alert else None,
         page=page,
         has_next=has_next,
     )

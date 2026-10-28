@@ -499,49 +499,154 @@ async def scrape_all():
 EXPECTED_EGRESS_IP = os.environ.get("EXPECTED_EGRESS_IP", "").strip()
 
 
+EGRESS_LOG_NAME = "__egress__"     # scrape_log に出口の状態を残すときの擬似アカウント名
+
+
+def _fetch_global_ip(use_proxy: bool, timeout: int = 15):
+    """
+    出口のグローバルIPを問い合わせる。
+
+    use_proxy=False のときは proxy 環境変数を無視して直接出る。
+    戻り値: (ip or None, error文字列 or None)
+    """
+    if use_proxy:
+        opener = urllib.request.build_opener()       # 環境変数のproxyに従う
+    else:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    err = None
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
+            with opener.open(req, timeout=timeout) as r:
+                ip = r.read().decode("utf-8", "replace").strip()
+                if ip:
+                    return ip, None
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+    return None, err
+
+
 def check_egress(verbose: bool = True) -> dict:
     """
     実際の出口グローバルIPを調べ、EXPECTED_EGRESS_IP と照合する。
 
     proxy環境変数の設定漏れは分離の抜け穴になる（Dockerホストが
     IPv6グローバルを持つため、素通しだとau側から出てしまう）。
-    スクレイプ前に毎回これを通し、想定外の出口なら中断する。
+    スクレイプ前に毎回これを通す。
 
-    戻り値: {ok, ip, expected, proxy, error?}
+    想定と違ったときは「proxyが効いているか」をもう一段切り分ける。
+    proxyを外した直接の出口IPと比べ、
+      - 違う  → proxyは効いている。proxy側の回線IPが変わっただけなので続行してよい
+      - 同じ  → proxyを迂回してDockerホストの回線から出ている。本物の漏れ
+      - 取れない → 判定できないので安全側に倒して止める
+    住宅向け回線はIPが変わることがあるので、ここで毎回止まると
+    気づかないまま何日も取得が死ぬ（実際に12日止まった）。
+
+    戻り値: {ok, ip, expected, proxy, via_proxy, verdict, reason, direct_ip?, error?}
+      verdict: "match" | "proxy_ip_changed" | "proxy_bypassed"
+               | "undetermined" | "unchecked" | "unreachable"
     """
     proxy = (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or "")
-    result = {"ok": False, "ip": None, "expected": EXPECTED_EGRESS_IP, "proxy": proxy}
+    result = {"ok": False, "ip": None, "expected": EXPECTED_EGRESS_IP,
+              "proxy": proxy, "via_proxy": None, "verdict": None, "reason": ""}
 
-    # IPv4を強制して問い合わせる。IPv6で抜けている場合を検出するため。
-    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                result["ip"] = r.read().decode("utf-8", "replace").strip()
-                break
-        except Exception as e:
-            result["error"] = f"{type(e).__name__}: {e}"
+    result["ip"], err = _fetch_global_ip(use_proxy=True)
+    if err:
+        result["error"] = err
 
     if not result["ip"]:
+        result["verdict"] = "unreachable"
+        result["reason"] = f"出口IPを取得できませんでした: {result.get('error', '')}"
         if verbose:
-            print(f"[!] 出口IPを取得できませんでした: {result.get('error', '')}")
+            print(f"[!] {result['reason']}")
         return result
 
     if not EXPECTED_EGRESS_IP:
         result["ok"] = True
+        result["verdict"] = "unchecked"
+        result["reason"] = f"出口IP {result['ip']}（EXPECTED_EGRESS_IP 未設定のため照合なし）"
         if verbose:
-            print(f"[*] 出口IP: {result['ip']}（EXPECTED_EGRESS_IP 未設定のため照合なし）")
+            print(f"[*] {result['reason']}")
         return result
 
-    result["ok"] = result["ip"] == EXPECTED_EGRESS_IP
-    if verbose:
-        if result["ok"]:
+    if result["ip"] == EXPECTED_EGRESS_IP:
+        result["ok"] = True
+        result["via_proxy"] = True
+        result["verdict"] = "match"
+        result["reason"] = f"出口IP {result['ip']}（想定どおり）"
+        if verbose:
             print(f"[+] 出口IP: {result['ip']}（想定どおり / proxy={proxy or 'なし'}）")
-        else:
-            print(f"[!] 出口IPが想定と違います: {result['ip']} "
-                  f"(想定 {EXPECTED_EGRESS_IP} / proxy={proxy or 'なし'})")
-            print("[!] proxy環境変数の設定漏れ、またはIPv6経由で抜けている可能性があります。")
+        return result
+
+    # ここから下は「想定と違った」ケース。proxyが効いているかを切り分ける。
+    if not proxy:
+        result["via_proxy"] = False
+        result["verdict"] = "proxy_bypassed"
+        result["reason"] = (f"出口IP {result['ip']} が想定 {EXPECTED_EGRESS_IP} と違い、"
+                            "proxy環境変数も未設定です（分離されていません）")
+        if verbose:
+            print(f"[!] {result['reason']}")
+        return result
+
+    direct_ip, direct_err = _fetch_global_ip(use_proxy=False)
+    result["direct_ip"] = direct_ip
+
+    if not direct_ip:
+        result["verdict"] = "undetermined"
+        result["reason"] = (f"出口IP {result['ip']} が想定 {EXPECTED_EGRESS_IP} と違い、"
+                            f"proxyが効いているかも判定できません（{direct_err}）")
+        if verbose:
+            print(f"[!] {result['reason']}")
+            print("[!] 判定できないので安全側に倒して中止します。")
+        return result
+
+    if direct_ip == result["ip"]:
+        result["via_proxy"] = False
+        result["verdict"] = "proxy_bypassed"
+        result["reason"] = (f"proxyを迂回しています: proxy経由 {result['ip']} と"
+                            f"直接 {direct_ip} が同じです（想定 {EXPECTED_EGRESS_IP}）")
+        if verbose:
+            print(f"[!] {result['reason']}")
+            print(f"[!] proxy={proxy} が機能していません。LXCの停止や"
+                  "IPv6経由の抜けを確認してください。")
+        return result
+
+    # proxy経由と直接で出口が違う＝分離は効いている。回線側のIPが変わっただけ。
+    result["ok"] = True
+    result["via_proxy"] = True
+    result["verdict"] = "proxy_ip_changed"
+    result["reason"] = (f"回線側の出口IPが {EXPECTED_EGRESS_IP} から {result['ip']} に"
+                        f"変わったようです（直接の出口は {direct_ip}／分離は効いています）")
+    if verbose:
+        print(f"[!] {result['reason']}")
+        print(f"[*] proxy経由であることは確認できたので続行します。"
+              f"落ち着いたら .env の EXPECTED_EGRESS_IP を {result['ip']} に更新してください。")
     return result
+
+
+def log_egress(res: dict):
+    """出口の状態を scrape_log に残す。ログファイルだけだと誰も気づかない。"""
+    verdict = res.get("verdict")
+    if verdict in ("match", "unchecked"):
+        return                        # 正常時は書かない（ログが膨らむだけ）
+    status = "warn" if res.get("ok") else "error"
+    try:
+        log_result(EGRESS_LOG_NAME, status, res.get("reason", "")[:500])
+    except Exception as e:
+        print(f"[!] 出口状態のログ記録に失敗: {e}")
+
+
+def clear_egress_log() -> int:
+    """出口の警告ログを消す。.env を直したあとバナーを黙らせるため。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM scrape_log WHERE screen_name = ?",
+                           (EGRESS_LOG_NAME,))
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
 
 
 def check_db_writable():
@@ -596,16 +701,22 @@ async def main():
         res = check_egress()
         sys.exit(0 if res["ok"] else 1)
 
+    if len(sys.argv) > 1 and sys.argv[1] == "clear-egress-log":
+        n = clear_egress_log()
+        print(f"[+] 出口の警告ログを{n}件消しました。")
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "relogin":
         await api.pool.login_all()
         print("[+] 再ログイン完了")
         return
 
-    # 出口の確認。想定と違えばスクレイプしない（分離が崩れた状態で走らせない）
+    # 出口の確認。proxyを迂回している（＝分離が崩れている）ときだけ止める。
     if EXPECTED_EGRESS_IP:
         eg = check_egress()
+        log_egress(eg)
         if not eg["ok"]:
-            print("[!] 出口IPが想定と異なるためスクレイプを中止します。")
+            print("[!] 分離が確認できないためスクレイプを中止します。")
             print("[!] 意図的に無効化する場合は EXPECTED_EGRESS_IP を空にしてください。")
             sys.exit(1)
 
