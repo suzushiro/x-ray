@@ -487,8 +487,14 @@ async def scrape_all():
             print(f"[+] {screen_name}: {len(tweets)}件取得 (新規{new_count}件)")
 
         except Exception as e:
-            log_result(screen_name, "error", str(e))
-            print(f"[!] {screen_name}: エラー {e}")
+            # twscrape 0.21.0 から、取得失敗やパース失敗は None を返すのではなく
+            # 例外（XClIdParseError / UserParseError / NoAccountError など）で飛んでくる。
+            # 型名が原因の切り分けそのものなので必ず残す。
+            # 旧版は Cloudflare に弾かれても "user not found" としか出ず、
+            # 障害の原因を誤認する一因になった。
+            detail = f"{type(e).__name__}: {e}".strip().rstrip(":").strip()
+            log_result(screen_name, "error", detail)
+            print(f"[!] {screen_name}: エラー {detail}")
 
         await asyncio.sleep(2)  # レート制限緩和のためアカウント間で少し待つ
 

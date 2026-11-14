@@ -154,5 +154,59 @@ except Exception as e:
     # 通信やアカウントプール由来のエラーは想定内。NameErrorでなければ可
     check("scrape_all が NameError では落ちない", True, f"({type(e).__name__})")
 
+print("\n== 1件の失敗が全体を巻き込まないか ==")
+# twscrape 0.21.0 から、取得失敗は None ではなく専用例外で飛んでくる。
+# 監視対象1件の例外でループ全体が止まると、1垢の不調で全件が死ぬ。
+# 将来の破壊的変更でここが崩れたら気づけるよう、実物の例外クラスで試す。
+from twscrape import XClIdParseError, NoAccountError
+
+conn = db.get_conn()
+conn.execute("DELETE FROM accounts")
+conn.execute("DELETE FROM scrape_log")
+for _n in ("ng_parse", "ng_nopool", "ng_none"):
+    conn.execute("INSERT INTO accounts (screen_name, display_name, categories)"
+                 " VALUES (?,?,?)", (_n, _n, '["test"]'))
+conn.commit(); conn.close()
+
+
+class _FakeAPI:
+    """Xに通信せずに、0.21.0が投げる例外だけを再現する。"""
+    def __init__(self, *a, **k):
+        self.pool = self
+
+    async def accounts_info(self):
+        return [{"username": "dummy"}]
+
+    async def user_by_login(self, sn):
+        if sn == "ng_parse":
+            raise XClIdParseError("X web scripts not found")
+        if sn == "ng_nopool":
+            raise NoAccountError("no accounts available")
+        return None          # 0.21.0: None は「Xにデータが無い」の意味
+
+    def user_tweets(self, *a, **k):
+        raise AssertionError("user_by_login で止まるはずなので到達しない")
+
+
+_real_api = scraper.API
+scraper.API = _FakeAPI
+try:
+    asyncio.run(scraper.scrape_all())
+finally:
+    scraper.API = _real_api
+
+conn = db.get_conn()
+_rows = dict((r[0], r[1]) for r in conn.execute(
+    "SELECT screen_name, message FROM scrape_log").fetchall())
+conn.close()
+
+check("例外が出ても3件すべて処理される", len(_rows) == 3, str(_rows))
+check("例外の型名がログに残る",
+      _rows.get("ng_parse", "").startswith("XClIdParseError"), str(_rows.get("ng_parse")))
+check("プール枯渇も型名で分かる",
+      _rows.get("ng_nopool", "").startswith("NoAccountError"), str(_rows.get("ng_nopool")))
+check("Noneはデータ無しとして扱う",
+      _rows.get("ng_none") == "user not found", str(_rows.get("ng_none")))
+
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
 sys.exit(1 if fails else 0)

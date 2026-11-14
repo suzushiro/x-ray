@@ -91,6 +91,17 @@ for path, needle, label in checks:
     if not hit:
         fails.append((path, f"missing {needle}"))
 
+# バージョン表記。h1に出ていないと「どの版が動いているか」が画面から分からなくなる。
+import re as _re
+_h = client.get("/").get_data(as_text=True)
+_m = _re.search(r"<h1>X-Ray.*?</h1>", _h, _re.S)
+_ok = bool(_m) and bool(_re.search(r"v\d", _m.group(0)))
+print(f"{'OK ' if _ok else 'NG '} h1にバージョンが出る: "
+      f"{_m.group(0) if _m else 'h1が見つからない'}")
+if not _ok:
+    fails.append(("/", "missing version in h1"))
+
+
 print("\n== テンプレートの閉じタグ漏れ ==")
 # <style>/<script> の閉じタグ外にコードが漏れていないか（cat >> 追記ミスの検出）
 for path in ("/"):

@@ -273,8 +273,35 @@ Firefox の **コンテナ（Multi-Account Containers）** ごとに X のクッ
 
 ## twscrape のバージョン
 
+現在は **0.21.0 以上**を要求している。
+
+0.21.0 の破壊的変更のうち、X-Ray に効くのは2つ。
+
+**1. `[curl]` extra が廃止**
+curl-cffi が必須依存になった。`twscrape[curl]` と書いても
+`does not provide the extra 'curl'` の警告が出るだけで入るが、紛らわしいので外した。
+httpx に戻したい場合は環境変数 `TWS_HTTP_BACKEND=httpx`。
+
+**2. 失敗が例外で飛ぶようになった**
+以前は取得失敗・パース失敗で `None` を返したり黙って反復を終えたりしていたが、
+0.21.0 からは `XClIdParseError` / `UserParseError` / `NoAccountError` 等の
+専用例外が送出される。`None` や空リストは「Xにデータが無い」を意味するようになった。
+
+`scraper.py` の取得ループは監視対象1件ずつ `try/except Exception` で囲んであるので、
+**1件の失敗が全体を巻き込むことはない**（失敗した分は `scrape_log` に error として残る）。
+ログには例外の型名も残すようにしてある。旧版は Cloudflare に弾かれても
+`user not found` としか出ず、2026-08の全停止で原因を誤認する一因になった。
+
+### 取得件数が少し減ることについて
+
+0.21.0 では「引用ツイートがタイムラインの単独項目として現れない」「ページをまたいだ
+重複が二重に yield されない」という修正が入った。どちらも旧版が余計に返していた分なので、
+**1アカウントあたりの取得件数が以前より減るのは正常**。新規保存件数には影響しない。
+
+### 過去の経緯
+
 issue #320（`Couldn't get XClientTxId indices script` / `XClIdGen` エラー）は
-**0.19.2 で修正済み**。フォーク指定は不要になったので `twscrape[curl]>=0.19.2` に戻し、
+**0.19.2 で修正済み**。フォーク指定は不要になったので
 `Dockerfile.worker` から `git` も外した。
 
 手元の `requirements.txt` がまだ `git+https://github.com/jonsuh/twscrape.git@...` を

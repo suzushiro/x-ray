@@ -17,6 +17,10 @@ os.environ.update({
     "TUMBLR_ACCOUNTS_FILE": f"{BASE}/tumblr_accounts.json",
     "TUMBLR_CONSUMER_KEY": "ck_test", "TUMBLR_CONSUMER_SECRET": "cs_test",
 })
+# 前回の残骸があると「未設定なら is_configured=False」が落ちる。
+# 毎回まっさらから始める（2回目以降の実行で偽の失敗を出さないため）。
+import shutil
+shutil.rmtree(BASE, ignore_errors=True)
 for d in (BASE, f"{BASE}/images", f"{BASE}/cache"):
     os.makedirs(d, exist_ok=True)
 
