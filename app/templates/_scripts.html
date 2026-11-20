@@ -29,7 +29,11 @@
         <div class="tmb-imgs" id="tmb-imgs"></div>
       </div>
       <div>
-        <div class="tmb-label">キャプション</div>
+        <div class="tmb-field-head">
+          <span class="tmb-label">キャプション</span>
+          <a href="#" class="tmb-selall" id="tmb-reset"
+             onclick="tmbResetPreset(event)" style="display:none">既定に戻す</a>
+        </div>
         <textarea id="tmb-caption" rows="2"></textarea>
       </div>
       <div>
@@ -383,8 +387,15 @@ function openTumblrShare(btn) {
         box.appendChild(cell);
     });
 
-    document.getElementById('tmb-caption').value = tmbCtx.handle;
-    document.getElementById('tmb-tags').value = cats.join(', ');
+    // 既定値はハンドル名とカテゴリ。以前この投稿主で投稿していればそれを優先する。
+    tmbCtx.defCaption = tmbCtx.handle;
+    tmbCtx.defTags = cats.join(', ');
+    const preset = tmbPresets[tmbCtx.handle];
+    document.getElementById('tmb-caption').value =
+        preset ? preset.caption : tmbCtx.defCaption;
+    document.getElementById('tmb-tags').value =
+        preset ? preset.tags : tmbCtx.defTags;
+    tmbShowReset(!!preset);
     document.getElementById('tmb-msg').textContent = '';
     document.getElementById('tmb-draft').checked = false;
 
@@ -455,6 +466,53 @@ function tmbApplyAutoDraft() {
     }
 }
 
+// Xの投稿主ごとに覚えてあるキャプション／タグ。{ handle: {caption, tags} }
+// ページを開いたときに1回だけ読む。tボタンを押した時点で通信すると、
+// モーダルが開いたあとに値が後出しで書き換わって入力と競合する。
+let tmbPresets = {};
+
+{% if tumblr_enabled %}
+// 読み込み済みなら即、まだならDOMContentLoadedで。
+// tボタンが押されるより先に揃っていればよい。
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', tmbLoadPresets);
+} else {
+    tmbLoadPresets();
+}
+{% endif %}
+
+async function tmbLoadPresets() {
+    try {
+        const res = await fetch('/api/tumblr/presets');
+        const data = await res.json();
+        if (data.ok) tmbPresets = data.presets || {};
+    } catch (e) {
+        tmbPresets = {};     // 読めなければ既定値で動く。投稿自体は妨げない
+    }
+}
+
+function tmbShowReset(on) {
+    const a = document.getElementById('tmb-reset');
+    if (a) a.style.display = on ? '' : 'none';
+}
+
+// 覚えている内容を捨てて、ハンドル名＋カテゴリに戻す
+async function tmbResetPreset(ev) {
+    if (ev) ev.preventDefault();
+    if (!tmbCtx) return;
+    document.getElementById('tmb-caption').value = tmbCtx.defCaption || '';
+    document.getElementById('tmb-tags').value = tmbCtx.defTags || '';
+    delete tmbPresets[tmbCtx.handle];
+    tmbShowReset(false);
+    const fd = new FormData();
+    fd.set('screen_name', tmbCtx.handle);
+    try {
+        await fetch('/api/tumblr/preset/delete', { method: 'POST', body: fd });
+    } catch (e) {
+        // 消せなくても画面上は既定値に戻っている。このまま投稿すれば上書きされる
+    }
+}
+
 // 投稿先の一覧を一度だけ読み込む
 let tmbAccounts = null;
 async function tmbLoadAccounts() {
@@ -504,6 +562,14 @@ async function tmbPost() {
             msg.textContent = '失敗: ' + (data.error || '不明なエラー');
             go.disabled = false;
             return;
+        }
+        // 投稿が通った内容をこのページでも覚えておく。
+        // 再読み込みせずに次のカードを開いても同じ値が出るようにするため。
+        if (data.screen_name) {
+            tmbPresets[data.screen_name] = {
+                caption: data.saved_caption || '',
+                tags: data.saved_tags || '',
+            };
         }
         msg.className = 'tmb-msg ok';
         const stateLabel = { published: '公開', draft: '下書き', private: '非公開',

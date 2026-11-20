@@ -35,6 +35,9 @@ def check(label, cond, detail=""):
 
 # ---- モックTumblr API -----------------------------------------------------
 CALLS = []
+# 要素を1つ積むと、次のPOSTを1回だけ失敗させる。
+# 「投稿に失敗したときは覚えない」を確かめるために使う。
+FAIL_NEXT = []
 
 
 class MockAPI(BaseHTTPRequestHandler):
@@ -62,6 +65,10 @@ class MockAPI(BaseHTTPRequestHandler):
                "ua": self.headers.get("User-Agent", ""),
                "ctype": self.headers.get("Content-Type", ""), "body": body}
         CALLS.append(rec)
+        if FAIL_NEXT:
+            FAIL_NEXT.pop()
+            return self._json(500, {"meta": {"status": 500, "msg": "Server Error"},
+                                    "response": {"errors": ["テスト用の失敗"]}})
         if "/blog/failblog/post" in self.path:
             return self._json(400, {"meta": {"status": 400, "msg": "Bad Request"},
                                     "response": {"errors": ["画像が不正です"]}})
@@ -367,7 +374,78 @@ r = c.post("/api/tumblr/post", data={"tweet_id": "t1", "state": "published"}).ge
 check("publishedで投稿できる", r.get("ok") and r.get("state") == "published", str(r))
 check("ボタンが描画される", html.count('onclick="openTumblrShare') == 1)
 check("キャプション既定に@を付けない",
-      "value = tmbCtx.handle" in html and "`@${tmbCtx.handle}`" not in html)
+      "tmbCtx.defCaption = tmbCtx.handle" in html
+      and "`@${tmbCtx.handle}`" not in html)
+
+print("\n== キャプション／タグを投稿主ごとに覚える ==")
+# 同じ人の投稿を上げるたびに同じ編集をやり直さずに済むようにするための保持。
+# キーはXの投稿主。保存するのは本文だけで、元ポストへのリンクは毎回作り直す。
+conn = db.get_conn()
+conn.execute("DELETE FROM tumblr_presets")
+conn.commit()
+conn.close()
+
+check("最初は何も覚えていない",
+      c.get("/api/tumblr/presets").get_json().get("presets") == {},
+      str(c.get("/api/tumblr/presets").get_json()))
+
+CALLS.clear()
+r = c.post("/api/tumblr/post", data={"tweet_id": "t1", "account": "main",
+                                     "caption": "Alice の絵", "tags": "art, girl"}).get_json()
+check("投稿は成功する", r.get("ok"), str(r))
+_p = c.get("/api/tumblr/presets").get_json()["presets"]
+check("投稿主をキーに覚える", "alice" in _p, str(_p))
+check("キャプション本文を覚える", _p.get("alice", {}).get("caption") == "Alice の絵", str(_p))
+check("タグを覚える", _p.get("alice", {}).get("tags") == "art, girl", str(_p))
+
+# ここが要点。保存するのは本文だけで、<a href> は覚えない。
+# 覚えてしまうと次の投稿で別の投稿へのリンクが付いたまま出てきてしまう。
+check("リンクは覚えない", "<a href" not in _p.get("alice", {}).get("caption", ""), str(_p))
+check("投稿本体にはリンクが付く",
+      b"https://x.com/alice/status/t1" in CALLS[0]["body"])
+
+# 2回目は上書き
+c.post("/api/tumblr/post", data={"tweet_id": "t1", "account": "main",
+                                 "caption": "二度目", "tags": "b"})
+_p = c.get("/api/tumblr/presets").get_json()["presets"]
+check("投稿するたび上書きされる", _p["alice"]["caption"] == "二度目", str(_p))
+check("行は増えない", len(_p) == 1, str(_p))
+
+# 投稿主が違えば別枠。ブックマークにしか無い投稿でも投稿主で引ける。
+c.post("/api/tumblr/post", data={"tweet_id": "bmonly", "account": "sub",
+                                 "caption": "Bobの", "tags": "z"})
+_p = c.get("/api/tumblr/presets").get_json()["presets"]
+check("投稿主ごとに別で覚える",
+      _p.get("alice", {}).get("caption") == "二度目"
+      and _p.get("bob", {}).get("caption") == "Bobの", str(_p))
+
+# 投稿に失敗した内容は覚えない（次回それが出てくると紛らわしい）
+FAIL_NEXT.append(True)
+r = c.post("/api/tumblr/post", data={"tweet_id": "t1", "account": "main",
+                                     "caption": "失敗するやつ", "tags": "ng"}).get_json()
+check("失敗時は ok=False", not r.get("ok"), str(r))
+_p = c.get("/api/tumblr/presets").get_json()["presets"]
+check("失敗した内容は覚えない", _p["alice"]["caption"] == "二度目", str(_p))
+
+# 既定に戻す
+r = c.post("/api/tumblr/preset/delete", data={"screen_name": "alice"}).get_json()
+check("削除APIが成功する", r.get("ok"), str(r))
+_p = c.get("/api/tumblr/presets").get_json()["presets"]
+check("消すと覚えていない状態に戻る", "alice" not in _p, str(_p))
+check("他の投稿主は消えない", "bob" in _p, str(_p))
+check("screen_nameなしは400",
+      c.post("/api/tumblr/preset/delete", data={}).status_code == 400)
+
+print("\n== 覚えた内容の画面側 ==")
+html = c.get("/").get_data(as_text=True)
+check("ページ読み込み時に覚えた内容を読む", "tmbLoadPresets" in html)
+check("開いた時点では通信しない（先読み済みを使う）",
+      "tmbPresets[tmbCtx.handle]" in html)
+check("覚えていれば既定より優先する",
+      "preset ? preset.caption : tmbCtx.defCaption" in html)
+check("既定に戻す導線がある",
+      'id="tmb-reset"' in html and "tmbResetPreset" in html)
+check("投稿後に画面側も更新する", "data.saved_caption" in html)
 
 srv.shutdown()
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))

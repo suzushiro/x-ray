@@ -163,6 +163,19 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_share_tokens_exp ON share_tokens(expires_at)
     """)
 
+    # Tumblr投稿のキャプション／タグを、Xの投稿主ごとに覚えておく。
+    # 同じ人の投稿を上げるたびに同じ編集をやり直さなくて済むようにするもの。
+    # caption は本文だけを保存する。投稿時に付く元ポストへのリンクは
+    # 投稿ごとに違うので、保存せず毎回その投稿のURLから作り直す。
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS tumblr_presets (
+        screen_name TEXT PRIMARY KEY,
+        caption     TEXT NOT NULL DEFAULT '',
+        tags        TEXT NOT NULL DEFAULT '',
+        updated_at  TEXT
+    )
+    """)
+
     # 手動で削除した画像の墓標。remote_url をキーにすることで
     # tweets / bookmarks の両方、および再スクレイプ時の再DLを一括で抑止する。
     # ここに行があれば「その画像は二度と表示も取得もしない」。

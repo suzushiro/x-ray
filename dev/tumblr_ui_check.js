@@ -57,7 +57,7 @@ function el(id, tag) {
 // 使う要素を先に用意する
 ["tmb", "tmb-imgs", "tmb-imgcount", "tmb-selall", "tmb-draft",
  "tmb-draft-auto", "tmb-go", "tmb-caption", "tmb-tags", "tmb-msg",
- "tmb-account"].forEach((id) => el(id));
+ "tmb-account", "tmb-reset"].forEach((id) => el(id));
 
 // モーダル本体としきい値
 el("tmb").dataset.draftThreshold = "3";
@@ -88,14 +88,30 @@ const src = [
   html.slice(html.indexOf("let tmbCtx"), html.indexOf("// 投稿先の一覧を一度だけ読み込む")),
   html.slice(html.indexOf("// byUser=true はチェックボックス"), html.indexOf("function tmbClose()")),
 ].join("\n")
+  // Jinjaのタグはそのままでは評価できないので落とす。
+  // ここで消しているのは読み込み時のフック登録だけで、関数本体には影響しない。
+  .replace(/\{%[\s\S]*?%\}/g, "")
   // vm のコンテキストから状態を読み書きできるよう let → var に置換する。
   // スコープが関数外という点は同じで、挙動は変わらない。
-  .replace(/^let (tmbCtx|tmbSel|tmbDraftTouched)\b/gm, "var $1");
+  .replace(/^let (tmbCtx|tmbSel|tmbDraftTouched|tmbPresets)\b/gm, "var $1");
+
+// 覚えた内容の削除APIに何が飛んだかを見るための記録
+const sent = [];
+class FakeFormData {
+  constructor() { this.data = {}; }
+  set(k, v) { this.data[k] = v; }
+}
 
 const ctx = vm.createContext({
   document: document_, console, Array, String, parseInt, isNaN, Object, JSON,
   atob: (b) => Buffer.from(b, "base64").toString("latin1"),
-  fetch: async () => ({ json: async () => ({ accounts: [] }) }),
+  FormData: FakeFormData,
+  // 投稿先セレクトの読み込みは範囲外。呼ばれても何もしない。
+  tmbLoadAccounts: () => {},
+  fetch: async (url, opt) => {
+    sent.push({ url, body: opt && opt.body ? opt.body.data : null });
+    return { json: async () => ({ accounts: [] }) };
+  },
 });
 vm.runInContext(src, ctx);
 
@@ -121,6 +137,62 @@ function setup(n) {
 const sel = () => ctx.tmbSel;
 const draft = () => el("tmb-draft").checked;
 const label = () => el("tmb-imgcount").textContent;
+
+// ---- tボタンのモック ------------------------------------------------------
+// openTumblrShare は押されたボタンからカードを辿るので、その分だけ用意する。
+function fakeBtn(handle, cats) {
+  const card = makeEl("div");
+  card.querySelectorAll = (sel) => (sel === ".tweet-media img" ? [] : []);
+  return {
+    dataset: {
+      tid: "t1",
+      handle,
+      url: "https://x.com/" + handle + "/status/t1",
+      cats: Buffer.from(JSON.stringify(cats)).toString("base64"),
+    },
+    closest: () => card,
+  };
+}
+
+console.log("== 覚えた内容があればそれを出す ==");
+ctx.tmbPresets = {};
+ctx.openTumblrShare(fakeBtn("alice", ["illustrator"]));
+check("覚えていなければハンドル名", el("tmb-caption").value === "alice",
+      el("tmb-caption").value);
+check("覚えていなければカテゴリ", el("tmb-tags").value === "illustrator",
+      el("tmb-tags").value);
+check("既定のときは戻す導線を出さない", el("tmb-reset").style.display === "none",
+      String(el("tmb-reset").style.display));
+
+ctx.tmbPresets = { alice: { caption: "Alice の絵", tags: "art, girl" } };
+ctx.openTumblrShare(fakeBtn("alice", ["illustrator"]));
+check("覚えた内容が既定より優先される", el("tmb-caption").value === "Alice の絵",
+      el("tmb-caption").value);
+check("覚えたタグが入る", el("tmb-tags").value === "art, girl", el("tmb-tags").value);
+check("戻す導線が出る", el("tmb-reset").style.display === "", String(el("tmb-reset").style.display));
+
+// 別の投稿主を開いたときに前の人の内容が残らないこと。
+// ここが混ざると他人のキャプションで投稿してしまう。
+ctx.openTumblrShare(fakeBtn("bob", ["photographer"]));
+check("覚えていない投稿主には持ち越さない", el("tmb-caption").value === "bob",
+      el("tmb-caption").value);
+check("タグも持ち越さない", el("tmb-tags").value === "photographer", el("tmb-tags").value);
+
+console.log("\n== 既定に戻す ==");
+ctx.tmbPresets = { alice: { caption: "Alice の絵", tags: "art, girl" } };
+ctx.openTumblrShare(fakeBtn("alice", ["illustrator"]));
+sent.length = 0;
+ctx.tmbResetPreset(null);
+check("キャプションが既定に戻る", el("tmb-caption").value === "alice",
+      el("tmb-caption").value);
+check("タグが既定に戻る", el("tmb-tags").value === "illustrator", el("tmb-tags").value);
+check("手元の記憶からも消える", ctx.tmbPresets.alice === undefined,
+      JSON.stringify(ctx.tmbPresets));
+check("戻す導線が消える", el("tmb-reset").style.display === "none",
+      String(el("tmb-reset").style.display));
+check("サーバにも削除を送る",
+      sent.length === 1 && sent[0].url === "/api/tumblr/preset/delete"
+      && sent[0].body.screen_name === "alice", JSON.stringify(sent));
 
 console.log("== 既定は全選択 ==");
 setup(4);

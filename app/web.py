@@ -62,7 +62,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "40"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "41"
 
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
@@ -825,6 +825,47 @@ def api_tumblr_accounts():
                     "accounts": tumblr_client.public_accounts()})
 
 
+@app.route("/api/tumblr/presets")
+def api_tumblr_presets():
+    """
+    Xの投稿主ごとに覚えてあるキャプション／タグを、まとめて1回で返す。
+    画面を開いたときに読み込んでおき、tボタンを押した時点では通信しない
+    （モーダルを開いてから値が後出しで書き換わるのを避けるため）。
+    """
+    conn = db()
+    rows = conn.execute(
+        "SELECT screen_name, caption, tags FROM tumblr_presets").fetchall()
+    return jsonify({"ok": True, "presets": {
+        r["screen_name"]: {"caption": r["caption"], "tags": r["tags"]} for r in rows
+    }})
+
+
+@app.route("/api/tumblr/preset/delete", methods=["POST"])
+def api_tumblr_preset_delete():
+    """覚えている内容を捨てて、次回から既定値（ハンドル名＋カテゴリ）に戻す。"""
+    screen_name = (request.form.get("screen_name") or "").strip().lstrip("@")
+    if not screen_name:
+        return jsonify({"ok": False, "error": "screen_nameが必要です"}), 400
+    conn = db()
+    conn.execute("DELETE FROM tumblr_presets WHERE screen_name=?", (screen_name,))
+    conn.commit()
+    return jsonify({"ok": True, "screen_name": screen_name})
+
+
+def _save_tumblr_preset(conn, screen_name, caption, tags):
+    """投稿が通ったときだけ呼ぶ。失敗した内容は覚えない。"""
+    if not screen_name:
+        return
+    conn.execute("""
+        INSERT INTO tumblr_presets (screen_name, caption, tags, updated_at)
+        VALUES (?,?,?,?)
+        ON CONFLICT(screen_name) DO UPDATE SET
+            caption=excluded.caption, tags=excluded.tags,
+            updated_at=excluded.updated_at
+    """, (screen_name, caption, tags, datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+
+
 @app.route("/api/tumblr/post", methods=["POST"])
 def api_tumblr_post():
     """
@@ -873,23 +914,42 @@ def api_tumblr_post():
     if not paths:
         return jsonify({"ok": False, "error": "投稿できるローカル画像がありません"}), 400
 
-    row = conn.execute("SELECT url FROM tweets WHERE tweet_id=?", (tweet_id,)).fetchone()
+    row = conn.execute("SELECT url, screen_name FROM tweets WHERE tweet_id=?",
+                       (tweet_id,)).fetchone()
     if not row:
-        row = conn.execute("SELECT url FROM bookmarks WHERE tweet_id=?",
+        row = conn.execute("SELECT url, screen_name FROM bookmarks WHERE tweet_id=?",
                            (tweet_id,)).fetchone()
     source_url = row["url"] if row else ""
+    # 覚えておくキーは投稿主。クライアントの申告ではなくDBから引く。
+    screen_name = (row["screen_name"] if row else "") or ""
 
-    caption = (request.form.get("caption") or "").strip()
+    raw_caption = (request.form.get("caption") or "").strip()
+    raw_tags = (request.form.get("tags") or "").strip()
+
+    # リンクは投稿ごとに違うので、保存するのは本文（raw_caption）だけにして
+    # ここで毎回その投稿のURLから巻き直す。
+    caption = raw_caption
     if caption and source_url:
         caption = f'<a href="{source_url}">{caption}</a>'
-    tags = [t.strip() for t in (request.form.get("tags") or "").split(",") if t.strip()]
+    tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
 
     res = tumblr_client.create_photo_post(
         account, paths, caption=caption, tags=tags, state=state, source_url=source_url)
     if not res.get("ok"):
         return jsonify(res), 502
+
+    # 投稿が通ってから覚える。失敗した内容を残すと次回それが出てきて紛らわしい。
+    try:
+        _save_tumblr_preset(conn, screen_name, raw_caption, raw_tags)
+    except Exception as e:
+        # 覚えられなくても投稿自体は成功している。ここで500にはしない。
+        print(f"[!] Tumblrプリセットの保存に失敗: {e}")
+
     res["label"] = account["label"]
     res["count"] = len(paths)
+    res["screen_name"] = screen_name
+    res["saved_caption"] = raw_caption
+    res["saved_tags"] = raw_tags
     return jsonify(res)
 
 
