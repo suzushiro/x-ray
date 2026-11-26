@@ -49,7 +49,11 @@
         <span>下書きとして投稿する（公開しない）</span>
       </label>
       <div class="tmb-note warn" id="tmb-draft-auto" style="display:none"></div>
-      <div class="tmb-note">
+      {# 出典の文言は出自で変わる。JinjaをJS内に書くと検証用のevalが
+         壊れるので、文言はHTML側に置いてJSは差し替えるだけにする。 #}
+      <div class="tmb-note" id="tmb-note-src"
+           data-x="選んだ投稿先にそのまま投稿します。出典はXの元投稿になります。"
+           data-ig="選んだ投稿先にそのまま投稿します。出典はInstagramの元投稿になります。">
         選んだ投稿先にそのまま投稿します。出典はXの元投稿になります。
       </div>
       <div class="tmb-msg" id="tmb-msg"></div>
@@ -390,7 +394,14 @@ function openTumblrShare(btn) {
     // 既定値はハンドル名とカテゴリ。以前この投稿主で投稿していればそれを優先する。
     tmbCtx.defCaption = tmbCtx.handle;
     tmbCtx.defTags = cats.join(', ');
-    const preset = tmbPresets[tmbCtx.handle];
+    // 覚えてある内容のキーは出自込み（data-pkey）。表示名とは別物。
+    tmbCtx.pkey = btn.dataset.pkey || tmbCtx.handle;
+    tmbCtx.isIg = (tmbCtx.pkey || '').indexOf('ig:') === 0;
+    const note = document.getElementById('tmb-note-src');
+    if (note) {
+        note.textContent = tmbCtx.isIg ? note.dataset.ig : note.dataset.x;
+    }
+    const preset = tmbPresets[tmbCtx.pkey];
     document.getElementById('tmb-caption').value =
         preset ? preset.caption : tmbCtx.defCaption;
     document.getElementById('tmb-tags').value =
@@ -502,10 +513,10 @@ async function tmbResetPreset(ev) {
     if (!tmbCtx) return;
     document.getElementById('tmb-caption').value = tmbCtx.defCaption || '';
     document.getElementById('tmb-tags').value = tmbCtx.defTags || '';
-    delete tmbPresets[tmbCtx.handle];
+    delete tmbPresets[tmbCtx.pkey];
     tmbShowReset(false);
     const fd = new FormData();
-    fd.set('screen_name', tmbCtx.handle);
+    fd.set('screen_name', tmbCtx.pkey);
     try {
         await fetch('/api/tumblr/preset/delete', { method: 'POST', body: fd });
     } catch (e) {

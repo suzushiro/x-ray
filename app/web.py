@@ -63,7 +63,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "45"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "47"
 
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
@@ -474,6 +474,65 @@ def timeline_rows(conn, category, limit, offset, show_r18=False,
         sql, (*x_params, limit, offset)).fetchall()]
 
 
+# 取得が「黙って止まる」のを原因に関係なく見張るしきい値（時間）。
+# 出口IPの判定で12日止まったとき、入れたのは「出口の異常をログに残す」で、
+# 原因を1つ塞いだだけだった。想定していない死に方は必ず残るので、
+# **最後に取れた時刻だけ**を見る見張りを別に置く。
+# 15分巡回なので3時間＝12回ぶん空いたら異常とみなす。Xの一時的な不調で
+# 鳴らない程度には鈍く、半日放置はしない程度には敏感な値として選んだ。
+try:
+    STALE_HOURS = float(os.environ.get("SCRAPE_STALE_HOURS", "3") or 3)
+except ValueError:
+    print("[!] SCRAPE_STALE_HOURS が数値ではありません（既定の3を使います）")
+    STALE_HOURS = 3.0
+
+
+def check_stale(conn):
+    """
+    最後に取得できてからの経過を見る。異常なら dict、正常なら None。
+
+    成功ログが1件も無いときに黙って None を返してはいけない。
+    scrape_log は7日で刈られるので、**7日以上止まると成功ログごと消えて
+    「何も無い＝正常」に見えてしまう**。一番警告が要る状況で黙る。
+    そこで成功ログが無いときは保存済みツイートの取得時刻で代用する。
+    """
+    if STALE_HOURS <= 0:
+        return None
+
+    row = conn.execute(
+        "SELECT MAX(run_at) AS t FROM scrape_log "
+        "WHERE status = 'ok' AND COALESCE(screen_name,'') != ?",
+        (EGRESS_LOG_NAME,)).fetchone()
+    last, basis = (row["t"] if row else None), "log"
+
+    if not last:
+        row = conn.execute("SELECT MAX(fetched_at) AS t FROM tweets").fetchone()
+        last, basis = (row["t"] if row else None), "tweets"
+
+    if not last:
+        return None             # 1件も取ったことがない＝入れたばかり
+
+    try:
+        t = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+    hours = (datetime.now(timezone.utc) - t).total_seconds() / 3600.0
+    if hours <= STALE_HOURS:
+        return None
+    return {
+        "hours": int(hours),
+        "days": round(hours / 24, 1),
+        "since": t.astimezone(JST).strftime("%Y-%m-%d %H:%M"),
+        "limit_h": round(STALE_HOURS, 1),
+        # ログから分かったのか、ツイートの取得時刻で代用したのか。
+        # 代用のときは「ログが刈られるほど長く止まっている」の合図でもある。
+        "basis": basis,
+    }
+
+
 @app.route("/")
 def index():
     category = request.args.get("category", "all")
@@ -510,6 +569,8 @@ def index():
             last_run_jst = dt_utc.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
         except Exception:
             last_run_jst = last_run["run_at"][:16].replace("T", " ") + " UTC"
+
+    stale = check_stale(conn)
 
     # ヘルス情報: 直近1時間のスクレイプログを集計
     health = conn.execute("""
@@ -578,6 +639,7 @@ def index():
         health=dict(health) if health else None,
         error_accounts=[dict(a) for a in error_accounts],
         egress_alert=dict(egress_alert) if egress_alert else None,
+        stale=stale,
         page=page,
         has_next=has_next,
     )
@@ -1007,9 +1069,26 @@ def api_tumblr_presets():
     conn = db()
     rows = conn.execute(
         "SELECT screen_name, caption, tags FROM tumblr_presets").fetchall()
-    return jsonify({"ok": True, "presets": {
-        r["screen_name"]: {"caption": r["caption"], "tags": r["tags"]} for r in rows
-    }})
+    presets = {r["screen_name"]: {"caption": r["caption"], "tags": r["tags"]}
+               for r in rows}
+
+    # ig-ray 側で既に編集したぶんを引き継ぐ。X-Ray に無いものだけ。
+    # 一度 X-Ray から投稿すれば X-Ray 側に保存され、以後はそちらが使われる。
+    ro = db_ro()
+    if ig_on():
+        try:
+            for r in ro.execute(
+                f"SELECT owner_username, caption, tags "
+                f"FROM {ig_bridge.SCHEMA}.tumblr_presets"
+            ):
+                key = ig_bridge.ID_PREFIX + r["owner_username"]
+                if key not in presets:
+                    presets[key] = {"caption": r["caption"] or "",
+                                    "tags": r["tags"] or ""}
+        except Exception:
+            pass          # 古い ig-ray にはこのテーブルが無い
+
+    return jsonify({"ok": True, "presets": presets})
 
 
 @app.route("/api/tumblr/preset/delete", methods=["POST"])
@@ -1052,12 +1131,8 @@ def api_tumblr_post():
     if not tweet_id:
         return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
 
-    if ig_bridge.is_ig_id(tweet_id):
-        # IGアーカイブは読むだけ。ここから先はXのテーブルを前提にしているので
-        # 通すとデータを壊す。画面側でもボタンを出していないが、
-        # 直接叩かれても拒否する。
-        return jsonify({"ok": False,
-                        "error": "IGの投稿はX-Rayからは変更できません"}), 400
+    # IGの投稿も投稿できる。IG側のDBには一切書かず、読んだ画像を送るだけ。
+    is_ig = ig_bridge.is_ig_id(tweet_id)
 
     account = tumblr_client.find_account((request.form.get("account") or "").strip())
     if not account:
@@ -1088,19 +1163,35 @@ def api_tumblr_post():
         if not indices:
             return jsonify({"ok": False, "error": "画像が選択されていません"}), 400
 
-    conn = db()
-    paths = _local_image_paths(tweet_id, conn, indices)
-    if not paths:
-        return jsonify({"ok": False, "error": "投稿できるローカル画像がありません"}), 400
-
-    row = conn.execute("SELECT url, screen_name FROM tweets WHERE tweet_id=?",
-                       (tweet_id,)).fetchone()
-    if not row:
-        row = conn.execute("SELECT url, screen_name FROM bookmarks WHERE tweet_id=?",
+    if is_ig:
+        # IG は読み取り専用の接続で引く（query_only が立っている）
+        ig_conn = db_ro()
+        if not ig_on():
+            return jsonify({"ok": False,
+                            "error": "IGアーカイブを読めません"}), 400
+        info = ig_bridge.post_info(ig_conn, tweet_id, indices)
+        if not info:
+            return jsonify({"ok": False, "error": "投稿が見つかりません"}), 400
+        paths, source_url = info["paths"], info["source_url"]
+        screen_name = ig_bridge.ID_PREFIX + info["owner"]
+        if not paths:
+            return jsonify({"ok": False,
+                            "error": "ローカルに保存された画像がありません"}), 400
+    else:
+        conn = db()
+        paths = _local_image_paths(tweet_id, conn, indices)
+        if not paths:
+            return jsonify({"ok": False,
+                            "error": "投稿できるローカル画像がありません"}), 400
+        row = conn.execute("SELECT url, screen_name FROM tweets WHERE tweet_id=?",
                            (tweet_id,)).fetchone()
-    source_url = row["url"] if row else ""
-    # 覚えておくキーは投稿主。クライアントの申告ではなくDBから引く。
-    screen_name = (row["screen_name"] if row else "") or ""
+        if not row:
+            row = conn.execute(
+                "SELECT url, screen_name FROM bookmarks WHERE tweet_id=?",
+                (tweet_id,)).fetchone()
+        source_url = row["url"] if row else ""
+        # 覚えておくキーは投稿主。クライアントの申告ではなくDBから引く。
+        screen_name = (row["screen_name"] if row else "") or ""
 
     raw_caption = (request.form.get("caption") or "").strip()
     raw_tags = (request.form.get("tags") or "").strip()
@@ -1118,8 +1209,10 @@ def api_tumblr_post():
         return jsonify(res), 502
 
     # 投稿が通ってから覚える。失敗した内容を残すと次回それが出てきて紛らわしい。
+    # **保存先は常に X-Ray 側のDB。** IG の投稿でも ig-ray のDBには書かない
+    # （読み取り専用を崩さないため）。キーは ig: 付きなので衝突しない。
     try:
-        _save_tumblr_preset(conn, screen_name, raw_caption, raw_tags)
+        _save_tumblr_preset(db(), screen_name, raw_caption, raw_tags)
     except Exception as e:
         # 覚えられなくても投稿自体は成功している。ここで500にはしない。
         print(f"[!] Tumblrプリセットの保存に失敗: {e}")

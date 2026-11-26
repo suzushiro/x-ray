@@ -93,9 +93,12 @@ def build_ig_db():
             if local:
                 sub = os.path.join(IG_CACHE, "ab")
                 os.makedirs(sub, exist_ok=True)
-                fn = os.path.join(sub, f"{code}_{i}.jpg")
-                Path(fn).write_bytes(b"\xff\xd8\xff\xd9")
-                lp = fn
+                Path(os.path.join(sub, f"{code}_{i}.jpg")).write_bytes(
+                    b"\xff\xd8\xff\xd9")
+                # **ig-ray は自分のコンテナ基準の絶対パスで記録する。**
+                # 実パスを入れると「パスの読み替え」を検証しないまま通る。
+                # 実際にそれで画像がリモートURLに落ちるバグを見逃した。
+                lp = f"/data/cache/ab/{code}_{i}.jpg"
             c.execute("INSERT INTO media_index (shortcode, media_index,"
                       " remote_url, local_path) VALUES (?,?,?,?)",
                       (code, i, media[i]["image_url"], lp))
@@ -294,12 +297,122 @@ print("\n== [5] IGは読むだけ ==")
 # ここが崩れるとX-Rayの書き込み経路がIGのIDを掴んでデータを壊す。
 check("IGカードにブックマークボタンを出さない",
       'data-tid="ig:IGAAA"' not in html)
+# 書き込み系は拒否する。Tumblr投稿は IG のDBに書かないので別扱い（後段）。
 for path, data in (("/api/bookmark/toggle", {"tweet_id": "ig:IGAAA"}),
-                   ("/api/media/delete", {"tweet_id": "ig:IGAAA", "index": "0"}),
-                   ("/api/tumblr/post", {"tweet_id": "ig:IGAAA"})):
+                   ("/api/media/delete", {"tweet_id": "ig:IGAAA", "index": "0"})):
     res = c.post(path, data=data)
     check(f"{path} はIGのIDを拒否する", res.status_code == 400,
           f"status={res.status_code}")
+
+print("\n== [5b] IGの投稿をTumblrへ ==")
+# ig-ray の web を止められるかはここにかかっている。
+# IG側のDBには一切書かず、読んだ実ファイルを送るだけであることも確かめる。
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+TCALLS = []
+
+
+class _MockTumblr(BaseHTTPRequestHandler):
+    def _j(self, code, body):
+        raw = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        self._j(200, {"meta": {"status": 200},
+                      "response": {"user": {"blogs": [{"name": "mainblog"}]}}})
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        TCALLS.append({"path": self.path, "body": self.rfile.read(n)})
+        self._j(201, {"meta": {"status": 201},
+                      "response": {"id": 1, "id_string": "1"}})
+
+    def log_message(self, *a):
+        pass
+
+
+_tsrv = HTTPServer(("127.0.0.1", 5393), _MockTumblr)
+threading.Thread(target=_tsrv.serve_forever, daemon=True).start()
+
+_accounts = os.path.join(BASE, "tumblr_accounts.json")
+json.dump([{"label": "main", "blog": "mainblog", "token": "t", "secret": "s"}],
+          open(_accounts, "w"))
+os.chmod(_accounts, 0o600)
+
+_tenv = dict(os.environ)
+_tenv.update({"TUMBLR_CONSUMER_KEY": "ck", "TUMBLR_CONSUMER_SECRET": "cs",
+              "TUMBLR_ACCOUNTS_FILE": _accounts})
+_tcode = f"""
+import sys, json, sqlite3
+sys.path.insert(0, {str(APP)!r})
+import ig_bridge, web
+web.tumblr_client.API_BASE = "http://127.0.0.1:5393/v2"
+cc = web.app.test_client()
+
+# ig-ray のパス表記から実ファイルを引けるか
+print("LOCALFILE", ig_bridge.local_file("/data/cache/ab/IGAAA_0.jpg"))
+print("TRAVERSAL", ig_bridge.local_file("/data/cache/../../etc/passwd"))
+
+h = cc.get("/?source=ig").get_data(as_text=True)
+print("BTN", h.count('onclick="openTumblrShare'))
+print("PKEY", 'data-pkey="ig:ig_artist"' in h)
+print("NOTE", 'data-ig="選んだ投稿先にそのまま投稿します。'
+      '出典はInstagramの元投稿になります。"' in h)
+
+r = cc.post("/api/tumblr/post", data={{"tweet_id": "ig:IGAAA", "account": "main",
+            "caption": "IGから投稿", "tags": "art"}}).get_json()
+print("POST", json.dumps(r, ensure_ascii=False))
+
+p = cc.get("/api/tumblr/presets").get_json()["presets"]
+print("PRESETKEY", "ig:ig_artist" in p)
+print("PRESETVAL", json.dumps(p.get("ig:ig_artist"), ensure_ascii=False))
+"""
+_out = subprocess.run([sys.executable, "-c", _tcode], capture_output=True,
+                      env=_tenv, text=True, timeout=180)
+_o = _out.stdout
+
+
+def _line(key):
+    for ln in _o.splitlines():
+        if ln.startswith(key + " "):
+            return ln[len(key) + 1:]
+    return ""
+
+
+check("ig-rayのパス表記から実ファイルを引ける",
+      _line("LOCALFILE").startswith(IG_CACHE), _line("LOCALFILE") or _out.stderr[-200:])
+check("キャッシュ外は拒否する", _line("TRAVERSAL") == "None", _line("TRAVERSAL"))
+check("IGカードにtボタンが出る", _line("BTN").isdigit() and int(_line("BTN")) >= 1,
+      _line("BTN"))
+check("覚えるキーに出自が付く", _line("PKEY") == "True", _line("PKEY"))
+
+_res = json.loads(_line("POST") or "{}")
+check("IGの投稿を投稿できる", _res.get("ok") is True, _line("POST"))
+check("2枚とも送られる", _res.get("count") == 2, _line("POST"))
+check("投稿主が ig: 付きで返る", _res.get("screen_name") == "ig:ig_artist",
+      _line("POST"))
+check("実バイナリが載っている", any(b"\xff\xd8\xff\xd9" in t["body"] for t in TCALLS),
+      str(len(TCALLS)))
+check("出典がInstagramのURLになる",
+      any(b"https://www.instagram.com/p/IGAAA/" in t["body"] for t in TCALLS))
+check("覚える先は ig: 付きのキー", _line("PRESETKEY") == "True", _line("PRESETKEY"))
+check("出典の文言をInstagram向けに差し替えられる",
+      _line("NOTE") == "True", _line("NOTE"))
+
+# ここが肝。ig-ray のDBに書いてしまうと読み取り専用の前提が崩れる。
+_chk = sqlite3.connect(IG_DB)
+try:
+    _n = _chk.execute("SELECT COUNT(*) FROM tumblr_presets").fetchone()[0]
+except Exception:
+    _n = 0      # そもそもテーブルが無いDBなら書かれていない
+_chk.close()
+check("ig-ray側のDBには書いていない", _n == 0, str(_n))
+_tsrv.shutdown()
 
 print("\n== [6] ig-ray側が変わっても壊れない ==")
 # 別リポジトリとして進化し続けるので、列が増えた/減ったで落ちないこと。

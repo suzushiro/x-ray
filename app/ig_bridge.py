@@ -245,23 +245,68 @@ def select_sql(conn, category="all", show_r18=False, require_media=False):
     return sql, params
 
 
+def cache_rel(local_path):
+    """
+    ig-ray が記録した local_path を、キャッシュ root からの相対パスに直す。
+
+    **ig-ray は自分のコンテナ基準の絶対パスで保存している**（既定 `/data/cache/...`）。
+    X-Ray 側は同じディレクトリを `/ig-data/cache` にマウントしているので、
+    素直に relpath を取ると `../../data/cache/...` になって使えない。
+    書いた側のパス表記に依存せず、キャッシュ root 以降だけを取り出す。
+
+    戻り値は "ab/XXXX_0.jpg" のような相対パス。取れなければ None。
+    """
+    if not local_path or not IG_CACHE_DIR:
+        return None
+
+    # 1) そのまま相対が取れるならそれでよい（同じパス表記で動いている場合）
+    try:
+        rel = os.path.relpath(local_path, IG_CACHE_DIR)
+        if not rel.startswith(".."):
+            return rel.replace(os.sep, "/")
+    except ValueError:
+        pass
+
+    # 2) パスの中の "cache/" 以降を拾う。ig-ray 側の root 名に依存しない。
+    norm = str(local_path).replace("\\", "/")
+    marker = "/cache/"
+    idx = norm.rfind(marker)
+    if idx >= 0:
+        return norm[idx + len(marker):]
+
+    # 3) 最後の手段。サブディレクトリ情報は失われるが何も出さないよりまし。
+    return os.path.basename(norm) or None
+
+
 def cache_url(local_path):
     """
     ig-ray の local_path を X-Ray が配信できるURLに直す。
 
     ig-ray 自身も `/cache/` で配っているが、**X-Ray の `/cache/` と衝突する**
     ので、こちらでは `/ig-cache/` に載せ替える。
-    キャッシュ外を指すパスは配信しない（ディレクトリトラバーサル防止）。
+    実体が無いときは None を返し、呼び出し側はリモートURLに落ちる。
     """
-    if not local_path or not IG_CACHE_DIR:
+    rel = cache_rel(local_path)
+    if not rel:
         return None
-    try:
-        rel = os.path.relpath(local_path, IG_CACHE_DIR)
-    except ValueError:
+    if ".." in rel.split("/"):
+        return None          # ディレクトリトラバーサル防止
+    if not os.path.exists(os.path.join(IG_CACHE_DIR, rel)):
         return None
-    if rel.startswith(".."):
+    return "/ig-cache/" + rel
+
+
+def local_file(local_path):
+    """
+    Tumblr へ添付するための**実ファイルの絶対パス**。無ければ None。
+
+    ファイル名だけ取り出すと開けない（ig-ray はサブディレクトリに置く）。
+    """
+    rel = cache_rel(local_path)
+    if not rel or ".." in rel.split("/"):
         return None
-    return "/ig-cache/" + rel.replace(os.sep, "/")
+    fp = os.path.join(IG_CACHE_DIR, rel)
+    return fp if os.path.exists(fp) else None
 
 
 def attach_media(conn, rows):
@@ -321,6 +366,80 @@ def attach_media(conn, rows):
         row["local_media_json"] = json.dumps(locals_, ensure_ascii=False)
 
     return rows
+
+
+def post_info(conn, tweet_id, indices=None):
+    """
+    Tumblr へ投稿するために必要なものを返す。
+
+    戻り値: {"paths": [実ファイルの絶対パス...], "source_url": str,
+             "owner": str} / 読めなければ None。
+
+    indices を渡すと**その順序どおり**に絞る。UI が選んだ順に番号を振って
+    見せているので、その順序をそのまま添付順にする。
+    """
+    code = shortcode_of(tweet_id)
+    if not code:
+        return None
+
+    row = conn.execute(
+        f"SELECT owner_username FROM {SCHEMA}.posts WHERE shortcode=?",
+        (code,)).fetchone()
+    if not row:
+        row = conn.execute(
+            f"SELECT owner_username FROM {SCHEMA}.bookmarks WHERE shortcode=?",
+            (code,)).fetchone()
+    if not row:
+        return None
+
+    locals_by_index = {}
+    for r in conn.execute(
+        f"SELECT media_index, local_path FROM {SCHEMA}.media_index "
+        f"WHERE shortcode=? ORDER BY media_index", (code,)
+    ):
+        if r["local_path"]:
+            locals_by_index[r["media_index"]] = r["local_path"]
+
+    order = sorted(locals_by_index)
+    if indices is not None:
+        # タイムライン側の添字は「表示している並び」なので、
+        # media_index の昇順に並べたものへの添字として解釈する。
+        picked = []
+        for i in indices:
+            if 0 <= i < len(order) and order[i] not in picked:
+                picked.append(order[i])
+        order = picked
+
+    paths = []
+    for idx in order:
+        fp = local_file(locals_by_index[idx])
+        if fp and fp not in paths:
+            paths.append(fp)
+
+    return {"paths": paths,
+            "source_url": f"{POST_URL_PREFIX}{code}/",
+            "owner": row["owner_username"] or ""}
+
+
+def legacy_preset(conn, owner):
+    """
+    ig-ray 側に覚えてあるキャプション／タグ（4.20 の tumblr_presets）。
+
+    X-Ray に同じ仕組みがあるので本来は X-Ray 側に持つが、
+    **ig-ray で既に編集したぶんを捨てない**ための読み取り専用の引き継ぎ。
+    X-Ray 側に無いときだけ使う。無ければ None。
+    """
+    if not owner:
+        return None
+    try:
+        r = conn.execute(
+            f"SELECT caption, tags FROM {SCHEMA}.tumblr_presets "
+            "WHERE owner_username=?", (owner,)).fetchone()
+    except Exception:
+        return None          # 古い ig-ray にはこのテーブルが無い
+    if not r:
+        return None
+    return {"caption": r["caption"] or "", "tags": r["tags"] or ""}
 
 
 def stats(conn):

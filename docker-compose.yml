@@ -72,6 +72,8 @@ services:
       TUMBLR_TAG_MAP: "${TUMBLR_TAG_MAP:-}"
       # 画面右上に出すバージョン表記の上書き（空ならコード側の既定値）
       APP_VERSION: "${APP_VERSION:-}"
+      # 取得が止まっていないかの見張り（時間）。0で無効
+      SCRAPE_STALE_HOURS: "${SCRAPE_STALE_HOURS:-3}"
       TUMBLR_DRAFT_THRESHOLD: "${TUMBLR_DRAFT_THRESHOLD:-3}"
       SHARE_TOKEN_TTL_MIN: "${SHARE_TOKEN_TTL_MIN:-60}"
     # web はスクレイピングしないのでproxyは設定しない

@@ -24,6 +24,7 @@ shutil.rmtree(BASE, ignore_errors=True)
 for d in (BASE, f"{BASE}/images", f"{BASE}/cache"):
     os.makedirs(d, exist_ok=True)
 
+
 fails = []
 
 
@@ -440,7 +441,7 @@ print("\n== 覚えた内容の画面側 ==")
 html = c.get("/").get_data(as_text=True)
 check("ページ読み込み時に覚えた内容を読む", "tmbLoadPresets" in html)
 check("開いた時点では通信しない（先読み済みを使う）",
-      "tmbPresets[tmbCtx.handle]" in html)
+      "tmbPresets[tmbCtx.pkey]" in html)
 check("覚えていれば既定より優先する",
       "preset ? preset.caption : tmbCtx.defCaption" in html)
 check("既定に戻す導線がある",

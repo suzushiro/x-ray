@@ -23,6 +23,16 @@
             全{{ total_count }}件
             {% if last_run_jst %} ・ 最終更新: {{ last_run_jst }}{% endif %}
         </div>
+        {% if stale %}
+        {# 原因が何であれ「取れていない」ことだけを言う。
+           個別の原因を潰しても想定外の死に方は残るので、これが最後の砦。 #}
+        <div class="health health-error">
+            🛑 {{ stale.hours }}時間 取得できていません（最終 {{ stale.since }}／
+            しきい値 {{ stale.limit_h }}時間）
+            {%- if stale.basis == 'tweets' %}・実行ログが残っていないほど長く止まっています{% endif %}
+            ・ <a href="/status" class="health-link">詳細 →</a>
+        </div>
+        {% endif %}
         {% if egress_alert %}
         <div class="health {% if egress_alert.status == 'error' %}health-error{% else %}health-warn{% endif %}">
             {% if egress_alert.status == 'error' %}🛑 取得停止（回線分離）{% else %}⚠️ 回線の出口IPが変わりました{% endif %}:
@@ -30,7 +40,9 @@
             ・ <a href="/status" class="health-link">詳細 →</a>
         </div>
         {% endif %}
-        {% if health %}
+        {# 止まっているときは「正常稼働中」を出さない。
+           止まっているのに緑が出るのが、気づけなかった原因そのもの。 #}
+        {% if health and not stale %}
         {% set has_error = error_accounts|length > 0 %}
         <div class="health {% if has_error %}health-warn{% else %}health-ok{% endif %}">
             {% if has_error %}
