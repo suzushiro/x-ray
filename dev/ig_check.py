@@ -303,14 +303,17 @@ check("画像の無い投稿はギャラリーに出ない", "IGNOML" not in gal
 
 print("\n== [5] IGは読むだけ ==")
 # ここが崩れるとX-Rayの書き込み経路がIGのIDを掴んでデータを壊す。
-check("IGカードにブックマークボタンを出さない",
-      'data-tid="ig:IGAAA"' not in html)
-# 書き込み系は拒否する。Tumblr投稿は IG のDBに書かないので別扱い（後段）。
-for path, data in (("/api/bookmark/toggle", {"tweet_id": "ig:IGAAA"}),
-                   ("/api/media/delete", {"tweet_id": "ig:IGAAA", "index": "0"})):
-    res = c.post(path, data=data)
-    check(f"{path} はIGのIDを拒否する", res.status_code == 400,
-          f"status={res.status_code}")
+# ブックマークは出す（X-Ray側に持つので安全）。
+# 出してはいけないのは削除の手がかりのほう。
+check("IGカードにブックマークボタンを出す",
+      'onclick="toggleBookmark(this)"' in html)
+check("IGカードに削除の手がかりは渡さない",
+      'data-tid="ig:IGAAA" data-mindexes' not in html)
+# 画像削除は IG では許さない（実体は ig-ray の持ち物）。
+# ブックマークと Tumblr 投稿は IG のDBに書かないので別扱い（後段）。
+_res = c.post("/api/media/delete", data={"tweet_id": "ig:IGAAA", "index": "0"})
+check("/api/media/delete はIGのIDを拒否する", _res.status_code == 400,
+      f"status={_res.status_code}")
 
 print("\n== [5a] ユーザーページ・検索・ストレージ ==")
 _u = c.get("/user/ig:ig_artist")
@@ -465,6 +468,58 @@ except Exception:
 _chk.close()
 check("ig-ray側のDBには書いていない", _n == 0, str(_n))
 _tsrv.shutdown()
+
+print("\n== [5c] ブックマークとミュート ==")
+# 前の節の状態を持ち込まない
+_cl = db.get_conn(); _cl.execute("DELETE FROM bookmarks"); _cl.commit(); _cl.close()
+# ブックマーク: ig-ray の保持期間で元画像が消えても残るよう、
+# 実体を X-Ray の永続領域へコピーする（X側の昇格と同じ考え方）。
+_r = c.post("/api/bookmark/toggle", data={"tweet_id": "ig:IGAAA"}).get_json()
+check("IGをブックマークできる", _r.get("ok") and _r.get("bookmarked"), str(_r))
+check("画像を永続領域へコピーする", _r.get("promoted", 0) == 2, str(_r))
+_copied = sorted(n for n in os.listdir(os.path.join(BASE, "x", "images"))
+                 if n.startswith("ig_"))
+check("実体が置かれている", len(_copied) == 2, str(_copied))
+
+_bm = c.get("/bookmarks").get_data(as_text=True)
+check("一覧に出る", "caption of IGAAA" in _bm)
+check("出自バッジが付く", "src-badge src-ig" in _bm)
+check("永続側の画像を参照する", "/images/ig_IGAAA_0.jpg" in _bm, )
+check("TLで★が点く", "marked" in c.get("/?source=ig").get_data(as_text=True))
+
+# 元がig-rayから消えても、ブックマークぶんは投稿できる
+_r2 = c.post("/api/bookmark/toggle", data={"tweet_id": "ig:IGAAA"}).get_json()
+check("解除できる", _r2.get("ok") and not _r2.get("bookmarked"), str(_r2))
+
+# ミュート: **ig-ray のDBに書く**ので向こうの画面とも揃う
+_m = c.post("/api/ig/mute", data={"username": "ig_artist", "muted": "1"}).get_json()
+check("ミュートできる", _m.get("ok") and _m.get("muted"), str(_m))
+_chk2 = sqlite3.connect(IG_DB)
+_mv = _chk2.execute("SELECT is_muted FROM accounts WHERE username='ig_artist'"
+                    ).fetchone()[0]
+_chk2.close()
+check("ig-ray側のDBに反映される", _mv == 1, str(_mv))
+check("TLから消える",
+      "caption of IGAAA" not in c.get("/?source=ig").get_data(as_text=True))
+check("ミュート一覧に出る", "ig_artist" in c.get("/ig-mutes").get_data(as_text=True))
+_m2 = c.post("/api/ig/mute", data={"username": "ig_artist", "muted": "0"}).get_json()
+check("解除できる（ミュート）", _m2.get("ok") and not _m2.get("muted"), str(_m2))
+check("TLに戻る",
+      "caption of IGAAA" in c.get("/?source=ig").get_data(as_text=True))
+check("usernameなしは400",
+      c.post("/api/ig/mute", data={}).status_code == 400)
+
+# 書き込み用の接続を分けてあること（読み取りはquery_onlyのまま）
+_ro = db.get_conn()
+ig_bridge.attach(_ro)
+_wrote = True
+try:
+    _ro.execute("UPDATE ig.accounts SET is_muted=1 WHERE username='ig_artist'")
+    _ro.commit()
+except Exception:
+    _wrote = False
+_ro.close()
+check("読み取り接続からは書けないまま", not _wrote)
 
 print("\n== [6] ig-ray側が変わっても壊れない ==")
 # 別リポジトリとして進化し続けるので、列が増えた/減ったで落ちないこと。

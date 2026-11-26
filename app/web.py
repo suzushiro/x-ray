@@ -63,7 +63,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "48"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "49"
 
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
@@ -259,6 +259,10 @@ def get_bookmarked_ids(conn):
 
 def format_tweet(d, bookmarked_ids=None, deleted=None):
     """DBの行dict（tweets JOIN accounts想定）を表示用に整形する"""
+    # 出自。タイムラインのSQLは列で持ってくるが、ブックマーク表のように
+    # 列が無い経路もあるので tweet_id の接頭辞から補う。
+    if not d.get("source"):
+        d["source"] = "ig" if ig_bridge.is_ig_id(d.get("tweet_id")) else "x"
     d["media"] = json.loads(d.get("media_json") or "[]")
     d["videos"] = json.loads(d.get("video_json") or "[]")
     d["local_media"] = json.loads(d.get("local_media_json") or "[]")
@@ -825,13 +829,6 @@ def api_bookmark_toggle():
     if not tweet_id:
         return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
 
-    if ig_bridge.is_ig_id(tweet_id):
-        # IGアーカイブは読むだけ。ここから先はXのテーブルを前提にしているので
-        # 通すとデータを壊す。画面側でもボタンを出していないが、
-        # 直接叩かれても拒否する。
-        return jsonify({"ok": False,
-                        "error": "IGの投稿はX-Rayからは変更できません"}), 400
-
     conn = db()
     existing = conn.execute(
         "SELECT tweet_id FROM bookmarks WHERE tweet_id=?", (tweet_id,)
@@ -841,6 +838,10 @@ def api_bookmark_toggle():
         conn.execute("DELETE FROM bookmarks WHERE tweet_id=?", (tweet_id,))
         conn.commit()
         return jsonify({"ok": True, "bookmarked": False})
+
+    # IG の投稿は ig-ray のDBから内容をコピーする。**向こうには書かない。**
+    if ig_bridge.is_ig_id(tweet_id):
+        return _bookmark_ig(conn, tweet_id)
 
     # ツイート本体を取得してコピー保存
     row = conn.execute("""
@@ -883,6 +884,113 @@ def api_bookmark_toggle():
     ))
     conn.commit()
     return jsonify({"ok": True, "bookmarked": True, "promoted": promoted})
+
+
+def _bookmarked_ig_paths(tweet_id, indices=None):
+    """
+    X-Ray にブックマークしてある IG 投稿から、添付できる実ファイルを返す。
+
+    ig-ray 側の保持期間で元が消えても、ブックマーク時に実体を
+    X-Ray の永続領域へコピーしてあるので投稿できる。
+    戻り値: (paths, source_url, screen_name)
+    """
+    row = db().execute(
+        "SELECT url, screen_name, local_media_json FROM bookmarks "
+        "WHERE tweet_id=?", (tweet_id,)).fetchone()
+    if not row:
+        return [], "", ""
+    try:
+        locals_ = json.loads(row["local_media_json"] or "[]")
+    except (TypeError, ValueError):
+        locals_ = []
+    order = [i for i, p in enumerate(locals_) if p]
+    if indices is not None:
+        order = [i for i in indices if i in order]
+    paths = []
+    for i in order:
+        fp = os.path.join(IMAGES_DIR, os.path.basename(locals_[i]))
+        if os.path.exists(fp) and fp not in paths:
+            paths.append(fp)
+    return (paths, row["url"] or "",
+            ig_bridge.ID_PREFIX + (row["screen_name"] or ""))
+
+
+def _bookmark_ig(conn, tweet_id):
+    """
+    IG の投稿を X-Ray のブックマークにコピーする。
+
+    画像は **X-Ray 側の永続領域に実体をコピーする。**
+    ig-ray のキャッシュは向こうの保持期間で消えるので、参照だけ持つと
+    「ブックマークしたのに画像が消える」になる。X 側のブックマークが
+    キャッシュから永続へ昇格させているのと同じ考え方。
+    コピー先は X-Ray の持ち物なので、読み取り専用の前提は崩れない。
+    """
+    ro = db_ro()
+    if not ig_on():
+        return jsonify({"ok": False, "error": "IGアーカイブを読めません"}), 400
+
+    code = ig_bridge.shortcode_of(tweet_id)
+    S = ig_bridge.SCHEMA
+    row = ro.execute(
+        f"SELECT p.shortcode, p.owner_username, p.caption, p.date_utc, p.likes,"
+        f" p.comments, p.media_json, a.full_name, a.categories_json,"
+        f" a.profile_pic_local "
+        f"FROM {S}.posts p LEFT JOIN {S}.accounts a"
+        f" ON p.owner_username = a.username WHERE p.shortcode = ?",
+        (code,)).fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "投稿が見つかりません"}), 404
+
+    try:
+        media = json.loads(row["media_json"] or "[]")
+    except (TypeError, ValueError):
+        media = []
+    remotes = [m.get("image_url") or "" for m in media if isinstance(m, dict)]
+
+    # ローカル実体を X-Ray の永続領域へコピー
+    locals_out, copied = [], 0
+    by_index = {}
+    for r in ro.execute(
+        f"SELECT media_index, local_path FROM {S}.media_index WHERE shortcode=?",
+        (code,)
+    ):
+        if r["local_path"]:
+            by_index[r["media_index"]] = r["local_path"]
+
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    for i, m in enumerate(media):
+        idx = m.get("index", i) if isinstance(m, dict) else i
+        src = ig_bridge.local_file(by_index.get(idx, ""))
+        if not src:
+            locals_out.append(None)
+            continue
+        ext = os.path.splitext(src)[1] or ".jpg"
+        name = f"ig_{code}_{idx}{ext}"
+        dst = os.path.join(IMAGES_DIR, name)
+        try:
+            if not os.path.exists(dst):
+                shutil.copyfile(src, dst)
+                copied += 1
+            locals_out.append(f"/images/{name}")
+        except Exception as e:
+            print(f"[!] IG画像のコピーに失敗 {src}: {type(e).__name__}: {e}")
+            locals_out.append(None)
+
+    conn.execute("""
+        INSERT INTO bookmarks
+        (tweet_id, screen_name, display_name, content, created_at, url,
+         media_json, local_media_json, video_json, categories,
+         profile_image_url, quoted_json, bookmarked_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (tweet_id, row["owner_username"],
+          row["full_name"] or row["owner_username"], row["caption"],
+          row["date_utc"], f"{ig_bridge.POST_URL_PREFIX}{code}/",
+          json.dumps(remotes, ensure_ascii=False),
+          json.dumps(locals_out, ensure_ascii=False),
+          None, row["categories_json"], row["profile_pic_local"], None,
+          datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    return jsonify({"ok": True, "bookmarked": True, "promoted": copied})
 
 
 def _purge_expired_shares(conn):
@@ -1074,6 +1182,52 @@ def api_tumblr_accounts():
                     "accounts": tumblr_client.public_accounts()})
 
 
+@app.route("/api/ig/mute", methods=["POST"])
+def api_ig_mute():
+    """
+    IG の投稿主をミュートする／解除する。
+
+    **ig-ray の accounts.is_muted を直接書く**ので、向こうの画面とも揃う。
+    書き込みは読み取りとは別の接続で行う（読む側は query_only のまま）。
+    """
+    username = (request.form.get("username") or "").strip().lstrip("@")
+    username = ig_bridge.shortcode_of(username) or username   # ig: が付いていても受ける
+    if not username:
+        return jsonify({"ok": False, "error": "usernameが必要です"}), 400
+    if not ig_bridge.available():
+        return jsonify({"ok": False, "error": "IGアーカイブを読めません"}), 400
+
+    raw = (request.form.get("muted") or "").strip().lower()
+    if raw in ("1", "true", "on", "yes"):
+        target = True
+    elif raw in ("0", "false", "off", "no"):
+        target = False
+    else:
+        # 明示されていなければ今の状態を反転する
+        ro = db_ro()
+        cur = False
+        if ig_on():
+            r = ro.execute(
+                f"SELECT COALESCE(is_muted,0) AS m FROM {ig_bridge.SCHEMA}.accounts "
+                "WHERE username=?", (username,)).fetchone()
+            cur = bool(r["m"]) if r else False
+        target = not cur
+
+    if not ig_bridge.set_mute(username, target,
+                              request.form.get("reason") or None):
+        return jsonify({"ok": False, "error": "ミュートを変更できませんでした"}), 500
+    return jsonify({"ok": True, "muted": target, "username": username})
+
+
+@app.route("/ig-mutes")
+def ig_mutes():
+    """ミュート中のIGアカウント一覧。解除もここから。"""
+    conn = db_ro()
+    accounts = ig_bridge.muted_accounts(conn) if ig_on() else []
+    return render_template("ig_mutes.html", accounts=accounts,
+                           ig_available=ig_on())
+
+
 @app.route("/api/tumblr/presets")
 def api_tumblr_presets():
     """
@@ -1185,13 +1339,18 @@ def api_tumblr_post():
             return jsonify({"ok": False,
                             "error": "IGアーカイブを読めません"}), 400
         info = ig_bridge.post_info(ig_conn, tweet_id, indices)
-        if not info:
-            return jsonify({"ok": False, "error": "投稿が見つかりません"}), 400
-        paths, source_url = info["paths"], info["source_url"]
-        screen_name = ig_bridge.ID_PREFIX + info["owner"]
-        if not paths:
-            return jsonify({"ok": False,
-                            "error": "ローカルに保存された画像がありません"}), 400
+        if info and info["paths"]:
+            paths, source_url = info["paths"], info["source_url"]
+            screen_name = ig_bridge.ID_PREFIX + info["owner"]
+        else:
+            # ig-ray 側から消えていても、X-Ray にブックマークしてあれば
+            # 画像の実体はこちらにコピーしてあるので投稿できる。
+            paths, source_url, screen_name = _bookmarked_ig_paths(
+                tweet_id, indices)
+            if not paths:
+                return jsonify(
+                    {"ok": False,
+                     "error": "ローカルに保存された画像がありません"}), 400
     else:
         conn = db()
         paths = _local_image_paths(tweet_id, conn, indices)
@@ -1292,6 +1451,9 @@ def bookmarks():
     tweets = []
     for r in rows:
         d = dict(r)
+        # 出自。この画面は format_tweet を通さず自前で組み立てているので
+        # ここでも補う（バッジとリンク先の出し分けに要る）。
+        d["source"] = "ig" if ig_bridge.is_ig_id(d.get("tweet_id")) else "x"
         d["media"] = json.loads(d.get("media_json") or "[]")
         d["videos"] = json.loads(d.get("video_json") or "[]")
         d["local_media"] = json.loads(d.get("local_media_json") or "[]")

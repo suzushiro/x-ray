@@ -109,7 +109,9 @@
         <span class="stat">🔁 {{ t.retweet_count }}</span>
         <span class="stat">💬 {{ t.reply_count }}</span>
         <div class="footer-right">
-            {% if show_bookmark and t.source != 'ig' %}
+            {# IGもブックマークできる。画像はX-Ray側にコピーするので
+               ig-ray のキャッシュが消えても残る。 #}
+            {% if show_bookmark %}
             <button class="bm-btn {% if t.is_bookmarked %}marked{% endif %}"
                     data-tid="{{ t.tweet_id }}" onclick="toggleBookmark(this)"
                     title="ブックマーク">{% if t.is_bookmarked %}★{% else %}☆{% endif %}</button>
@@ -130,6 +132,8 @@
                     onclick="openTumblrShare(this)">t</button>
             {% endif %}
             {% if t.source == 'ig' %}
+            <button class="bm-btn" title="このアカウントをミュート"
+                    onclick="igMute(this, '{{ t.screen_name }}')">🔇</button>
             <a href="{{ t.url }}" target="_blank" class="tweet-link">Instagramで見る →</a>
             {% else %}
             <a href="{{ t.url }}" target="_blank" class="tweet-link">Xで見る →</a>

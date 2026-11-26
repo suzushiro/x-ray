@@ -524,6 +524,48 @@ async function tmbResetPreset(ev) {
     }
 }
 
+// IGのミュート。取得も表示も止まるので、必ず確認してから。
+async function igMute(btn, username) {
+    if (!confirm(`@${username} をミュートしますか？\n\n`
+                 + 'ミュート中は取得も表示もされません。\n'
+                 + 'この設定はIG-Rayと共有され、「🔇 IGミュート」から解除できます。')) {
+        return;
+    }
+    btn.disabled = true;
+    const fd = new FormData();
+    fd.set('username', username);
+    fd.set('muted', '1');
+    try {
+        const res = await fetch('/api/ig/mute', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!data.ok) { alert(data.error || 'ミュートできませんでした'); btn.disabled = false; return; }
+        // 画面からも消す。再読み込みを待たせない。
+        document.querySelectorAll('.tweet').forEach((el) => {
+            const h = el.querySelector('.tweet-handle');
+            if (h && h.textContent.replace('@', '') === username) el.remove();
+        });
+    } catch (e) {
+        alert('ミュートできませんでした');
+        btn.disabled = false;
+    }
+}
+
+async function igUnmute(btn, username) {
+    btn.disabled = true;
+    const fd = new FormData();
+    fd.set('username', username);
+    fd.set('muted', '0');
+    try {
+        const res = await fetch('/api/ig/mute', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.ok) { location.reload(); return; }
+        alert(data.error || '解除できませんでした');
+    } catch (e) {
+        alert('解除できませんでした');
+    }
+    btn.disabled = false;
+}
+
 // ナビの出自プルダウン。option の value が遷移先URLそのもの。
 // JSでURLを組み立てないのは、組み立てを2箇所（テンプレとJS）に
 // 分けると片方だけ直して壊す事故が起きるため。

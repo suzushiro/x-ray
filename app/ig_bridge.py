@@ -32,6 +32,7 @@ ig-ray 側の変更でこちらが落ちるのが一番避けたい事故なの�
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 
 # ig-ray の DB とメディア置き場。未設定なら統合そのものを無効にする。
 _CONFIGURED_DB_PATH = os.environ.get("IG_DB_PATH", "").strip()
@@ -440,6 +441,86 @@ def legacy_preset(conn, owner):
     if not r:
         return None
     return {"caption": r["caption"] or "", "tags": r["tags"] or ""}
+
+
+def write_conn():
+    """
+    **書き込み用**の接続。ミュートの切り替えだけに使う。
+
+    読み取り用（attach + query_only）とは別にする。読む側を書き込み可に
+    すると、表示経路のバグが ig-ray のデータを壊しうる。
+    書く操作はごく少ないので、そのときだけ開いて閉じる。
+
+    使い終わったら呼び出し側で close すること。読めなければ None。
+    """
+    if not available():
+        return None
+    try:
+        conn = sqlite3.connect(IG_DB_PATH, timeout=IG_BUSY_TIMEOUT_MS / 1000.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {IG_BUSY_TIMEOUT_MS}")
+        return conn
+    except Exception as e:
+        print(f"[!] IGアーカイブに書き込み接続できません: {type(e).__name__}: {e}")
+        return None
+
+
+def set_mute(username, muted, reason=None):
+    """
+    ig-ray の accounts.is_muted を切り替える。
+
+    ig-ray 本体と同じ列を使うので、**向こうの画面とも揃う**。
+    成功したら True。列が無い古いDBなら False。
+    """
+    conn = write_conn()
+    if not conn:
+        return False
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
+        if "is_muted" not in cols:
+            return False
+        if "muted_at" in cols and "mute_reason" in cols:
+            conn.execute(
+                "UPDATE accounts SET is_muted=?, muted_at=?, mute_reason=? "
+                "WHERE username=?",
+                (1 if muted else 0,
+                 datetime.now(timezone.utc).isoformat() if muted else None,
+                 reason if muted else None, username))
+        else:
+            conn.execute("UPDATE accounts SET is_muted=? WHERE username=?",
+                         (1 if muted else 0, username))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[!] IGのミュート切り替えに失敗: {type(e).__name__}: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def muted_accounts(conn):
+    """
+    ミュート中のアカウント一覧（表示用）。読み取り接続で引く。
+
+    mute_reason / muted_at は ig-ray 側の版によって無いことがあるので、
+    ある列だけを読む。無い列を名指しすると一覧ごと空になる。
+    """
+    cols = _columns(conn, "accounts")
+    if "is_muted" not in cols:
+        return []
+    sel = ["username"]
+    sel.append("full_name" if "full_name" in cols else "NULL AS full_name")
+    sel.append("COALESCE(mute_reason,'') AS reason" if "mute_reason" in cols
+               else "'' AS reason")
+    sel.append("COALESCE(muted_at,'') AS muted_at" if "muted_at" in cols
+               else "'' AS muted_at")
+    try:
+        return [dict(r) for r in conn.execute(
+            f"SELECT {', '.join(sel)} FROM {SCHEMA}.accounts "
+            "WHERE COALESCE(is_muted, 0) = 1 ORDER BY username")]
+    except Exception as e:
+        print(f"[!] IGのミュート一覧を引けません: {type(e).__name__}: {e}")
+        return []
 
 
 def stats(conn):
