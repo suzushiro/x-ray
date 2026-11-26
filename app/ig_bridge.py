@@ -523,6 +523,69 @@ def muted_accounts(conn):
         return []
 
 
+# ig-ray が scrape_log に使う擬似アカウント名と、成功とみなすステータス。
+# **ここは ig/app/db.py と揃える。** 向こうに新しいステータスが増えたら
+# ここにも足さないと「成功しているのに止まって見える」になる。
+LOG_EGRESS = "__egress__"
+LOG_LOGIN = "__login__"
+PSEUDO_ACCOUNTS = (LOG_EGRESS, LOG_LOGIN)
+OK_STATUSES = ("ok", "ok_degraded", "backfill_done")
+
+
+def health(conn, interval_sec=21600.0, stale_intervals=3.0):
+    """
+    IG取得側の健康状態。X-Ray の画面に出すためにまとめて返す。
+
+    取得を X-Ray に取り込むと、**IG側の異常がどこにも表示されない**状態に
+    なる。IG-Ray では 24日、X-Ray では 12日、どちらも「止まっているのに
+    画面が正常と言い続けた」ことで気づけなかった。同じ轍を踏まないよう、
+    出口・ログイン・無音の3つをまとめて出す。
+
+    戻り値: {"egress": {...}|None, "login": {...}|None, "stale": {...}|None}
+    どれも無ければ各値 None。読めなければ全体 None。
+    """
+    out = {"egress": None, "login": None, "stale": None}
+    try:
+        for key, name in (("egress", LOG_EGRESS), ("login", LOG_LOGIN)):
+            r = conn.execute(
+                f"SELECT status, message, ended_at FROM {SCHEMA}.scrape_log "
+                "WHERE username = ? AND ended_at > datetime('now','-12 hours') "
+                "ORDER BY ended_at DESC LIMIT 1", (name,)).fetchone()
+            if r and r["status"] not in OK_STATUSES:
+                out[key] = {"status": r["status"],
+                            "message": (r["message"] or "")[:300],
+                            "at": r["ended_at"]}
+
+        # 無音の見張り。原因に関係なく「最後に取れた時刻」だけを見る。
+        marks = ",".join("?" * len(OK_STATUSES))
+        pseudo = ",".join("?" * len(PSEUDO_ACCOUNTS))
+        r = conn.execute(
+            f"SELECT MAX(ended_at) AS t FROM {SCHEMA}.scrape_log "
+            f"WHERE status IN ({marks}) "
+            f"  AND COALESCE(username,'') NOT IN ({pseudo})",
+            tuple(OK_STATUSES) + PSEUDO_ACCOUNTS).fetchone()
+        last = r["t"] if r else None
+        if not last:
+            # ログが刈られているときは投稿の取得時刻で代用する。
+            # X-Ray 側で踏んだのと同じ穴（止まるほどログが消えて無言になる）。
+            r = conn.execute(
+                f"SELECT MAX(fetched_at) AS t FROM {SCHEMA}.posts").fetchone()
+            last = r["t"] if r else None
+        if last:
+            t = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            hours = (datetime.now(timezone.utc) - t).total_seconds() / 3600.0
+            limit = max(interval_sec / 3600.0 * stale_intervals, 1.0)
+            if hours > limit:
+                out["stale"] = {"hours": int(hours), "limit_h": round(limit, 1),
+                                "since": t.isoformat()}
+    except Exception as e:
+        print(f"[!] IGの状態を読めません: {type(e).__name__}: {e}")
+        return None
+    return out
+
+
 def stats(conn):
     """ストレージ画面などに出す件数。読めなければ None。"""
     try:

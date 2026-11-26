@@ -33,6 +33,27 @@
             ・ <a href="/status" class="health-link">詳細 →</a>
         </div>
         {% endif %}
+        {% if ig_health %}
+        {# IG取得側の異常。X側とは別に出す（原因も対処先も別のため）。 #}
+        {% if ig_health.stale %}
+        <div class="health health-error">
+            🛑 IG: {{ ig_health.stale.hours }}時間 取得できていません
+            （しきい値 {{ ig_health.stale.limit_h }}時間）
+        </div>
+        {% endif %}
+        {% if ig_health.login %}
+        <div class="health health-error">
+            🛑 IG: ログインに失敗しています
+            <span class="health-account">{{ ig_health.login.message }}</span>
+        </div>
+        {% endif %}
+        {% if ig_health.egress %}
+        <div class="health {% if ig_health.egress.status == 'ok' %}health-warn{% else %}health-error{% endif %}">
+            ⚠️ IG: 出口の異常
+            <span class="health-account">{{ ig_health.egress.message }}</span>
+        </div>
+        {% endif %}
+        {% endif %}
         {% if egress_alert %}
         <div class="health {% if egress_alert.status == 'error' %}health-error{% else %}health-warn{% endif %}">
             {% if egress_alert.status == 'error' %}🛑 取得停止（回線分離）{% else %}⚠️ 回線の出口IPが変わりました{% endif %}:

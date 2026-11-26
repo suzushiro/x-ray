@@ -392,6 +392,34 @@ docker compose exec worker python scraper.py clear-egress-log
   （大文字・小文字の両方、`NO_PROXY` の除外も動作確認）
 - 出口のグローバルIPが変わったら `.env` の `EXPECTED_EGRESS_IP` を更新する
 
+## IG取得（ig/ 配下）
+
+IG-Ray の取得系を `ig/` に取り込んである。**リポジトリと compose は1つ、
+ただしイメージは分ける**（instaloader は Python 3.12 固定で、twscrape とは
+依存の系統が違う。同居させると片方の更新でもう片方が壊れる）。
+
+詳細は `ig/README.md`。設定は `.env` の `IG_RAY_*`。
+
+```bash
+# profile 付きのサービスは素の build ではビルドされない
+docker compose --profile ig-cron --profile ig-tools --profile ig-backfill build
+docker compose run --rm ig-ipcheck        # 出口IPの確認
+docker compose --profile ig-cron up -d    # 巡回を有効化
+```
+
+### IG側の異常もトップに出す
+
+取得を取り込むと、**IG側の異常がどこにも表示されない**状態になる。
+IG-Ray で24日、X-Ray で12日、どちらも「止まっているのに画面が正常」で
+気づけなかったので、出口・ログイン・無音の3つをトップに出す。
+
+- 出口の異常（`__egress__`）
+- ログイン失敗（`__login__`）
+- 無音（`IG_RAY_INTERVAL` × `IG_RAY_STALE_INTERVALS` を超えて成功が無い）
+
+`backfill_done` は成功扱い（IG-Ray でこれを失敗と数えて赤字の誤報を出した）。
+擬似アカウントの行は「取れた」と数えない。
+
 ## 取得が黙って止まったことに気づく
 
 出口IPの判定で **12日間**、取得が1件も走っていなかったことがある。

@@ -63,7 +63,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "49"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "51"
 
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
@@ -506,6 +506,14 @@ def _utc_key(d):
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
+# IG側の見張り。巡回間隔（秒）の何倍で異常とみなすか。
+try:
+    IG_INTERVAL_SEC = float(os.environ.get("IG_RAY_INTERVAL", "21600") or 21600)
+    IG_STALE_INTERVALS = float(os.environ.get("IG_RAY_STALE_INTERVALS", "3") or 3)
+except ValueError:
+    IG_INTERVAL_SEC, IG_STALE_INTERVALS = 21600.0, 3.0
+
+
 def check_stale(conn):
     """
     最後に取得できてからの経過を見る。異常なら dict、正常なら None。
@@ -590,6 +598,9 @@ def index():
             last_run_jst = last_run["run_at"][:16].replace("T", " ") + " UTC"
 
     stale = check_stale(conn)
+    # IG取得側の健康状態。取り込んだ以上、こちらが出さないと誰も気づけない。
+    ig_health = (ig_bridge.health(conn, IG_INTERVAL_SEC, IG_STALE_INTERVALS)
+                 if ig_on() else None)
 
     # ヘルス情報: 直近1時間のスクレイプログを集計
     health = conn.execute("""
@@ -659,6 +670,7 @@ def index():
         error_accounts=[dict(a) for a in error_accounts],
         egress_alert=dict(egress_alert) if egress_alert else None,
         stale=stale,
+        ig_health=ig_health,
         page=page,
         has_next=has_next,
     )

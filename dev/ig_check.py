@@ -110,6 +110,11 @@ def build_ig_db():
     add_post("IGCOAU", "ig_coauthor", "2026-11-19T05:00:00+00:00", 1)
     add_post("IGR18", "ig_r18", "2026-11-19T06:00:00+00:00", 1)
     add_post("IGNOML", "ig_artist", "2026-11-19T00:30:00+00:00", 0)  # 画像なし
+    # 取得側のログ。X-Ray が IG の健康状態を出せるかの検証に使う。
+    c.execute("""CREATE TABLE scrape_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, status TEXT NOT NULL,
+        fetched INTEGER DEFAULT 0, inserted INTEGER DEFAULT 0, message TEXT,
+        started_at TEXT, ended_at TEXT NOT NULL DEFAULT (datetime('now')))""")
     c.commit()
     c.close()
 
@@ -520,6 +525,58 @@ except Exception:
     _wrote = False
 _ro.close()
 check("読み取り接続からは書けないまま", not _wrote)
+
+print("\n== [5d] IG取得側の健康状態を画面に出す ==")
+# 取得を X-Ray に取り込むと、IG側の異常がどこにも出なくなる。
+# IG-Rayで24日、X-Rayで12日、どちらも「止まっているのに画面が正常」で
+# 気づけなかった。同じ轍を踏まないための検証。
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+
+def _ig_log(rows, clear=True):
+    """IG側の scrape_log を作って / を描画し、本文を返す。"""
+    cc = sqlite3.connect(IG_DB)
+    if clear:
+        cc.execute("DELETE FROM scrape_log")
+    for user, status, msg, hours in rows:
+        cc.execute("INSERT INTO scrape_log (username, status, message, ended_at)"
+                   " VALUES (?,?,?,?)",
+                   (user, status, msg,
+                    (_dt.now(_tz.utc) - _td(hours=hours)).isoformat()))
+    cc.commit(); cc.close()
+    return c.get("/").get_data(as_text=True)
+
+# 正常に取れている
+_h = _ig_log([("ig_artist", "ok", "", 0.2)])
+check("正常なら何も出さない",
+      "IG: " not in _h or "取得できていません" not in _h, )
+
+# 出口の異常
+_h = _ig_log([("ig_artist", "ok", "", 0.2),
+              ("__egress__", "error", "proxyを迂回しています", 0.1)])
+check("出口の異常が出る", "IG: 出口の異常" in _h)
+check("理由がそのまま読める", "proxyを迂回しています" in _h)
+
+# ログイン失敗
+_h = _ig_log([("ig_artist", "ok", "", 0.2),
+              ("__login__", "login_error", "401 Unauthorized", 0.1)])
+check("ログイン失敗が出る", "IG: ログインに失敗しています" in _h)
+check("理由が読める（ログイン）", "401 Unauthorized" in _h)
+
+# 無音（巡回間隔6時間 x 3 = 18時間を超える）
+_h = _ig_log([("ig_artist", "ok", "", 48)])
+check("止まっていたら出る", "IG: 48時間 取得できていません" in _h, )
+
+# 擬似アカウントの成功を「取れた」と数えない
+_h = _ig_log([("ig_artist", "ok", "", 48), ("__egress__", "ok", "", 0.1)])
+check("擬似アカウントの行では無音判定を解除しない",
+      "取得できていません" in _h, )
+
+# backfill_done は成功扱い（IG-Rayで赤字の誤報を出したことがある）
+_h = _ig_log([("ig_artist", "backfill_done", "", 0.2)])
+check("backfill_done は失敗にしない", "取得できていません" not in _h)
+
+_ig_log([("ig_artist", "ok", "", 0.2)])      # 後続の節に持ち込まない
 
 print("\n== [6] ig-ray側が変わっても壊れない ==")
 # 別リポジトリとして進化し続けるので、列が増えた/減ったで落ちないこと。
