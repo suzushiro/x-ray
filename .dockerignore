@@ -1,0 +1,39 @@
+# ビルドコンテキストに入れないもの。
+#
+# **これが無いとアーカイブ全部が毎回 Docker デーモンへ送られる。**
+# data/ には画像とDBが入っていて、IGを取り込んでからは ig-data/ も増えた。
+# イメージに焼くのは app/ と ig/app/ だけなので、それ以外は送らない。
+
+# 実データ（イメージには入れない。実行時にマウントする）
+data/
+ig-data/
+*.db
+*.db-wal
+*.db-shm
+
+# 配布物・作業物
+*.zip
+.git/
+.gitignore
+NOTES*.md
+*.local.md
+
+# テストと補助。コンテナには入れない
+# （ig-diag / ig-probe は ig/dev を実行時にマウントして使う）
+dev/
+ig/dev/
+tools/
+extension/
+deploy/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# エディタ・OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

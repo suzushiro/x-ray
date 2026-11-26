@@ -578,6 +578,23 @@ check("backfill_done は失敗にしない", "取得できていません" not i
 
 _ig_log([("ig_artist", "ok", "", 0.2)])      # 後続の節に持ち込まない
 
+print("\n== [5e] ビルドコンテキストと除外設定 ==")
+# .dockerignore が無いと、アーカイブ全部が毎回 Docker デーモンへ送られる。
+# IGを取り込んで ig-data/ が増えたので、抜けていると効き方が大きい。
+_root = HERE.parent
+_di = (_root / ".dockerignore")
+check(".dockerignore がある", _di.exists())
+_ditxt = _di.read_text() if _di.exists() else ""
+for _p in ("data/", "ig-data/", "dev/", "ig/dev/"):
+    check(f"{_p} をビルドに送らない", _p in _ditxt)
+# 逆に、イメージに焼くものを除外していないこと（除外すると build が落ちる）
+for _p in ("app/", "ig/app/"):
+    check(f"{_p} は除外していない",
+          not any(l.strip() == _p for l in _ditxt.splitlines()))
+
+_gi = (_root / ".gitignore").read_text()
+check("ig-data/ を git に上げない", "ig-data/" in _gi)
+
 print("\n== [6] ig-ray側が変わっても壊れない ==")
 # 別リポジトリとして進化し続けるので、列が増えた/減ったで落ちないこと。
 c2 = sqlite3.connect(IG_DB)
