@@ -49,9 +49,17 @@ services:
       - "${WEB_PORT:-8501}:5000"
     volumes:
       - ./data:/data
+      # IG-Ray のアーカイブ。**読み取り専用(:ro)にしないこと。**
+      # SQLite の WAL は読むだけでも -shm を作る必要があり、ig-ray が
+      # -wal を残したまま落ちていると :ro では開けずタイムラインごと落ちる。
+      # 書き込みは app/ig_bridge.py が PRAGMA query_only で禁じている。
+      - "${IG_RAY_DATA_DIR:-./data/ig-ray-empty}:/ig-data"
     environment:
       <<: *image-env
       DB_PATH: /data/data.db
+      # IG-Ray 統合。空にすると統合そのものが無効になる。
+      IG_DB_PATH: "${IG_DB_PATH:-}"
+      IG_CACHE_DIR: "${IG_CACHE_DIR:-/ig-data/cache}"
       TWITTER_COOKIES_FILE: /data/cookies.txt
       ACCOUNTS_JSON_PATH: /data/accounts.json
       # Tumblr共有（/share を外部公開する場合のみ設定）

@@ -18,6 +18,7 @@ from db import get_conn
 import seed_accounts
 import cache_utils
 import tumblr_client
+import ig_bridge
 
 # Tumblr共有ページを外部公開する際のベースURL（例: https://share.example.com）。
 # 未設定なら共有機能は無効。X-Ray本体ではなく /share/<token> だけを
@@ -62,7 +63,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "41"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "42"
 
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
@@ -108,6 +109,7 @@ def _inject_share_flag():
         "tumblr_enabled": tumblr_client.is_configured(),
         "tumblr_draft_threshold": TUMBLR_DRAFT_THRESHOLD,
         "app_version": APP_VERSION,
+        "ig_configured": ig_bridge.configured(),
     }
 
 
@@ -121,11 +123,35 @@ def db():
     return g.conn
 
 
+def db_ro():
+    """
+    IGアーカイブを繋いだ**読み取り専用**コネクション。
+
+    `db()` と分けてあるのは、ig_bridge.attach() が `PRAGMA query_only` を
+    立てるため。書き込みのあるルートで使うと X-Ray 側の更新まで弾かれる。
+    タイムラインやギャラリーのような読むだけの画面で使う。
+
+    IGが読めないときは素の（ATTACHしていない）コネクションを返す。
+    その場合 `g.ig_on` が False になるので、呼び出し側はX側だけで組み立てる。
+    """
+    if "conn_ro" not in g:
+        conn = get_conn()
+        g.ig_on = ig_bridge.attach(conn)
+        g.conn_ro = conn
+    return g.conn_ro
+
+
+def ig_on():
+    """このリクエストでIGアーカイブが読めているか"""
+    return bool(g.get("ig_on"))
+
+
 @app.teardown_appcontext
 def close_db(exc):
-    conn = g.pop("conn", None)
-    if conn is not None:
-        conn.close()
+    for key in ("conn", "conn_ro"):
+        conn = g.pop(key, None)
+        if conn is not None:
+            conn.close()
 
 
 def page_arg(name="page"):
@@ -189,6 +215,29 @@ def get_category_counts(conn, categories_list):
                     counts[c] += r["cnt"]
         except Exception:
             pass
+
+    # IGアーカイブぶんも足す。表示には出ているのに件数に入っていないと
+    # 「photographer 0件」なのに写真が並ぶ、という食い違いになる。
+    if ig_on():
+        try:
+            hide_sql, params = ig_bridge.hidden_owner_sql(conn)
+            where = f"WHERE {hide_sql} " if hide_sql else ""
+            for r in conn.execute(f"""
+                SELECT a.categories_json AS cats, COUNT(*) AS cnt
+                FROM {ig_bridge.SCHEMA}.posts p
+                LEFT JOIN {ig_bridge.SCHEMA}.accounts a
+                       ON p.owner_username = a.username
+                {where}GROUP BY a.categories_json
+            """, params):
+                total += r["cnt"]
+                try:
+                    for c in json.loads(r["cats"] or "[]"):
+                        if c in counts:
+                            counts[c] += r["cnt"]
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[!] IGの件数集計に失敗: {type(e).__name__}: {e}")
 
     _counts_cache.update({"at": now, "counts": counts, "total": total})
     return counts, total
@@ -278,6 +327,21 @@ def format_tweet(d, bookmarked_ids=None, deleted=None):
     return d
 
 
+@app.route("/ig-cache/<path:filename>")
+def serve_ig_cache(filename):
+    """
+    IG-Ray 側のキャッシュ画像を配信する。
+
+    ig-ray も自分では `/cache/` で配っているが、**X-Ray の `/cache/` と
+    衝突する**ので別のパスに載せ替えてある。実体は ig-ray の data を
+    マウントしたディレクトリで、こちらからは読むだけ。
+    """
+    if not ig_bridge.IG_CACHE_DIR:
+        from flask import abort
+        abort(404)
+    return send_from_directory(ig_bridge.IG_CACHE_DIR, filename)
+
+
 @app.route("/images/<path:filename>")
 def serve_image(filename):
     """永続画像を配信。無ければキャッシュ側にフォールバック。"""
@@ -297,40 +361,105 @@ def serve_cache(filename):
     return send_from_directory(CACHE_DIR, filename)
 
 
+# タイムラインで使う列。X と IG で**同じ並び**にする必要がある
+# （UNION ALL は列名ではなく位置で対応するため）。
+TL_COLUMNS = """
+    source, tweet_id, screen_name, display_name, content, created_at, url,
+    like_count, retweet_count, reply_count, media_json, video_json,
+    local_media_json, categories, profile_image_url, reply_to_tweet_id,
+    quoted_json
+"""
+
+# 並び替えのキー。created_at をそのまま文字列比較してはいけない。
+# X と IG で保存形式のオフセットが揃っておらず（+09:00 と +00:00 が混在しうる）、
+# 素の文字列ソートだと時系列が狂う。strftime はオフセットを畳んで UTC に
+# 正規化するので、これを通した値で並べる。
+TL_ORDER = "strftime('%Y-%m-%dT%H:%M:%S', created_at)"
+
+
+def _x_timeline_sql(category, show_r18=False, require_media=False):
+    """X側の1件分のSELECT。列は TL_COLUMNS と同じ並び。"""
+    # カテゴリを選んでいるときは R18 で追加の絞り込みをしない（既存の挙動）。
+    # 「all のときだけ R18 を伏せる」が元からの仕様で、タブで R18 を選べば出る。
+    where, params = [], []
+    if category == "all":
+        if not show_r18:
+            where.append("a.categories NOT LIKE '%\"R18\"%'")
+    else:
+        where.append("a.categories LIKE ?")
+        params.append(f'%"{category}"%')
+    if require_media:
+        where.append("t.media_json IS NOT NULL AND t.media_json != '[]'")
+    where = " AND ".join(where) or "1=1"
+    sql = f"""
+        SELECT 'x' AS source, t.tweet_id, t.screen_name, a.display_name,
+               t.content, t.created_at, t.url, t.like_count, t.retweet_count,
+               t.reply_count, t.media_json, t.video_json, t.local_media_json,
+               a.categories, a.profile_image_url, t.reply_to_tweet_id,
+               t.quoted_json
+        FROM tweets t
+        JOIN accounts a ON t.screen_name = a.screen_name
+        WHERE {where}
+    """
+    return sql, params
+
+
+def timeline_rows(conn, category, limit, offset, show_r18=False,
+                  require_media=False):
+    """
+    X と IG を時系列に混ぜた1ページぶんの行を返す。
+
+    IGが読めないときはX側だけ。ig-ray 側の事情でこちらが落ちないよう、
+    混合クエリが失敗したらX単独にフォールバックする。
+    """
+    x_sql, x_params = _x_timeline_sql(category, show_r18, require_media)
+
+    if ig_on():
+        ig_sql, ig_params = ig_bridge.select_sql(
+            conn, category=category, show_r18=show_r18,
+            require_media=require_media)
+        # UNION の ORDER BY には式を書けない（SQLiteは結果列の名前か番号しか
+        # 受け付けない）。外側のSELECTで包んでから並べ替える。
+        merged = f"""
+            SELECT * FROM (
+                SELECT {TL_COLUMNS} FROM ( {x_sql} )
+                UNION ALL
+                SELECT {TL_COLUMNS} FROM ( {ig_sql} )
+            )
+            ORDER BY {TL_ORDER} DESC
+            LIMIT ? OFFSET ?
+        """
+        try:
+            return [dict(r) for r in conn.execute(
+                merged, (*x_params, *ig_params, limit, offset)).fetchall()]
+        except Exception as e:
+            print(f"[!] IGを混ぜたタイムラインに失敗（X単独で続行）: "
+                  f"{type(e).__name__}: {e}")
+
+    sql = (f"SELECT * FROM ( SELECT {TL_COLUMNS} FROM ( {x_sql} ) ) "
+           f"ORDER BY {TL_ORDER} DESC LIMIT ? OFFSET ?")
+    return [dict(r) for r in conn.execute(
+        sql, (*x_params, limit, offset)).fetchall()]
+
+
 @app.route("/")
 def index():
     category = request.args.get("category", "all")
     page = page_arg()
     offset = (page - 1) * PER_PAGE
 
-    conn = db()
+    conn = db_ro()
     bookmarked_ids = get_bookmarked_ids(conn)
     deleted_media = cache_utils.deleted_urls(conn)
 
-    if category == "all":
-        rows = conn.execute("""
-            SELECT t.*, a.display_name, a.categories, a.profile_image_url
-            FROM tweets t
-            JOIN accounts a ON t.screen_name = a.screen_name
-            WHERE a.categories NOT LIKE '%"R18"%'
-            ORDER BY t.created_at DESC
-            LIMIT ? OFFSET ?
-        """, (PER_PAGE + 1, offset)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT t.*, a.display_name, a.categories, a.profile_image_url
-            FROM tweets t
-            JOIN accounts a ON t.screen_name = a.screen_name
-            WHERE a.categories LIKE ?
-            ORDER BY t.created_at DESC
-            LIMIT ? OFFSET ?
-        """, (f'%"{category}"%', PER_PAGE + 1, offset)).fetchall()
+    rows = timeline_rows(conn, category, PER_PAGE + 1, offset)
 
     # PER_PAGE+1件取得して、次ページがあるか判定
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
 
-    tweets = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
+    rows = ig_bridge.attach_media(conn, rows) if ig_on() else rows
+    tweets = [format_tweet(r, bookmarked_ids, deleted_media) for r in rows]
 
     # 各カテゴリの件数（タブのバッジ用）
     categories_list = get_categories()
@@ -582,6 +711,13 @@ def api_bookmark_toggle():
     tweet_id = (request.form.get("tweet_id") or "").strip()
     if not tweet_id:
         return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
+
+    if ig_bridge.is_ig_id(tweet_id):
+        # IGアーカイブは読むだけ。ここから先はXのテーブルを前提にしているので
+        # 通すとデータを壊す。画面側でもボタンを出していないが、
+        # 直接叩かれても拒否する。
+        return jsonify({"ok": False,
+                        "error": "IGの投稿はX-Rayからは変更できません"}), 400
 
     conn = db()
     existing = conn.execute(
@@ -880,6 +1016,13 @@ def api_tumblr_post():
     if not tweet_id:
         return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
 
+    if ig_bridge.is_ig_id(tweet_id):
+        # IGアーカイブは読むだけ。ここから先はXのテーブルを前提にしているので
+        # 通すとデータを壊す。画面側でもボタンを出していないが、
+        # 直接叩かれても拒否する。
+        return jsonify({"ok": False,
+                        "error": "IGの投稿はX-Rayからは変更できません"}), 400
+
     account = tumblr_client.find_account((request.form.get("account") or "").strip())
     if not account:
         return jsonify({"ok": False, "error": "投稿先アカウントが見つかりません"}), 400
@@ -965,6 +1108,13 @@ def api_media_delete():
     if not tweet_id:
         return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
 
+    if ig_bridge.is_ig_id(tweet_id):
+        # IGアーカイブは読むだけ。ここから先はXのテーブルを前提にしているので
+        # 通すとデータを壊す。画面側でもボタンを出していないが、
+        # 直接叩かれても拒否する。
+        return jsonify({"ok": False,
+                        "error": "IGの投稿はX-Rayからは変更できません"}), 400
+
     conn = db()
     delete_all = (request.form.get("all") or "").strip().lower() in ("1", "true", "on", "yes")
 
@@ -1049,29 +1199,14 @@ def gallery():
     page = page_arg()
     offset = (page - 1) * PER_PAGE
 
-    conn = db()
+    conn = db_ro()
 
-    where = ["t.media_json IS NOT NULL", "t.media_json != '[]'"]
-    params = []
-    if not show_r18:
-        where.append("a.categories NOT LIKE '%\"R18\"%'")
-    if category != "all":
-        where.append("a.categories LIKE ?")
-        params.append(f'%"{category}"%')
-
-    where_sql = " AND ".join(where)
-    params_full = params + [PER_PAGE + 1, offset]
-    rows = conn.execute(f"""
-        SELECT t.tweet_id, t.screen_name, t.media_json, t.local_media_json,
-               t.url, t.created_at, a.display_name, a.categories
-        FROM tweets t JOIN accounts a ON t.screen_name = a.screen_name
-        WHERE {where_sql}
-        ORDER BY t.created_at DESC
-        LIMIT ? OFFSET ?
-    """, params_full).fetchall()
+    rows = timeline_rows(conn, category, PER_PAGE + 1, offset,
+                         show_r18=show_r18, require_media=True)
 
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
+    rows = ig_bridge.attach_media(conn, rows) if ig_on() else rows
 
     # 画像を平坦化（1画像=1グリッドアイテム）
     deleted = cache_utils.deleted_urls(conn)
@@ -1093,6 +1228,7 @@ def gallery():
                 "tweet_id": d["tweet_id"],
                 "idx": i + 1,                      # 何枚目か（ファイル名用）
                 "created_at": d["created_at"],
+                "source": d.get("source", "x"),
             })
 
     next_url = (

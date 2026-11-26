@@ -147,6 +147,16 @@ main { max-width: 640px; margin: 0 auto; padding-bottom: 40px; }
 .tweet-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
 .tweet-name { font-weight: 700; font-size: 14px; }
 .tweet-handle { color: var(--text-dim); font-size: 13px; }
+/* 出自バッジ。XとIGが同じTLに並ぶので、どちらのアーカイブか一目で分かるようにする */
+.src-badge {
+    font-size: 10px; font-weight: 700; line-height: 1;
+    padding: 2px 5px; border-radius: 4px; vertical-align: middle;
+    letter-spacing: 0.04em;
+}
+.src-ig {
+    color: #fff;
+    background: linear-gradient(45deg, #f09433, #dc2743, #bc1888);
+}
 .tweet-time { color: var(--text-dim); font-size: 12px; margin-left: auto; }
 
 .avatar {

@@ -392,6 +392,78 @@ docker compose exec worker python scraper.py clear-egress-log
   （大文字・小文字の両方、`NO_PROXY` の除外も動作確認）
 - 出口のグローバルIPが変わったら `.env` の `EXPECTED_EGRESS_IP` を更新する
 
+## IG-Ray のアーカイブを取り込む（任意）
+
+[IG-Ray](https://github.com/suzushiro/ig-ray) で集めた Instagram のアーカイブを、
+X-Ray のタイムラインとギャラリーに**混ぜて表示**できる。
+
+**取得は持ち込まない。** instaloader・cron・backfill は ig-ray 側に残したままで、
+X-Ray からは**読むだけ**。IGの投稿にはブックマーク・画像削除・Tumblr投稿の
+ボタンを出さない（X-Rayの書き込み経路はXのテーブルを前提にしているため）。
+IGから投稿したいときは ig-ray の画面を使う。
+
+### 設定
+
+`.env` に3つ。ig-ray を同じホストで動かしている前提。
+
+```
+IG_RAY_DATA_DIR=/home/youruser/ig-ray/data
+IG_DB_PATH=/ig-data/ig_ray.db
+IG_CACHE_DIR=/ig-data/cache
+```
+
+`IG_RAY_DATA_DIR` はホスト側のパス、残り2つは**コンテナ内から見たパス**
+（`/ig-data` にマウントされる）。`IG_DB_PATH` を空にすると統合は無効になる。
+
+```bash
+docker compose build web && docker compose up -d web
+```
+
+### 読み取り専用マウントにしてはいけない
+
+compose のマウントに `:ro` を付けたくなるが、**付けると壊れる。**
+
+SQLite の WAL モードは読むだけでも `-shm`（共有メモリ索引）を必要とする。
+ig-ray が `-wal` を残したまま落ちて `-shm` が消えている状態だと、
+読み取り専用では -shm を作れず **DBを開くことすらできず、X-Rayの
+タイムラインごと落ちる**。`immutable=1` を付ければ開けるが、これは
+「このファイルは一生変化しない」と SQLite に嘘をつく指定で、ig-ray が
+動き出すと古い値や壊れた読みを返しうる。
+
+そこで**書き込み可でマウントし、`PRAGMA query_only = 1` で守る**。
+`app/ig_bridge.py` が ATTACH の直後にこれを立てるので、書き込みは
+`attempt to write a readonly database` で確実に弾かれる。
+マウント権限ではなく SQLite 側で担保する形。
+`dev/ig_check.py` の [8] がこの状況を実際に作って読めることを固定している。
+
+### 表示の決まり
+
+- **監視対象（`accounts.is_target = 1`）以外とミュートは出さない。** ig-ray 本体と
+  同じ規則。共同投稿では `owner_username` が相手側になるので、絞らないと
+  登録していないアカウントの投稿が並ぶ
+- `is_target` 列が無い古いDBのときは**絞り込みをしない**。空集合と
+  「列が無い」を混同すると投稿が全部消えて障害に見える
+- カテゴリのタブとバッジはXとIGの合算。表示されているのに数に入っていないと
+  食い違って見えるため
+- IGのカードには出自バッジ（IG）が付き、リンクは「Instagramで見る →」になる
+
+### 時刻の正規化
+
+XとIGで `created_at` のオフセットが揃っていない（`+09:00` と `+00:00` が
+混在しうる）。**素の文字列比較で並べると時系列が狂い、片方が上に固まる。**
+`strftime('%Y-%m-%dT%H:%M:%S', created_at)` でUTCに畳んでから並べている。
+
+このぶん並べ替えにインデックスが効かない。X 20万件 ＋ IG 3万件で
+1ページ 100件の取得が約 180ms（正規化なしなら約 110ms）。個人用途なら
+許容できる差として正確さを採った。
+
+### ig-ray が無い・壊れていても動く
+
+ig-ray は別リポジトリとして進化し続けるので、**向こうの都合でこちらが
+落ちないこと**を優先している。DBが無い・開けない・スキーマが変わった、
+いずれの場合もIGが出なくなるだけでX-Ray本体は動く。
+混合クエリが失敗したらX単独にフォールバックする。
+
 ## Tumblr投稿（API直接 / 推奨）
 
 `.env` に Tumblr のアプリキーを設定すると、確認画面から**そのまま投稿できる**。
