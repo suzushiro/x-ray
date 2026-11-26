@@ -352,6 +352,50 @@ print("XOK", "tweet x1" in r.get_data(as_text=True))
     check(f"{label}でもトップが200で返る", "STATUS 200" in out2, out2.strip()[:160])
     check(f"{label}でもXの投稿は出る", "XOK True" in out2, out2.strip()[:160])
 
+print("\n== [7b] DBのファイル名が旧名でも読める ==")
+# ig-ray は v4.1 で ig_ray.db に改名したが、既存DBは作り直さず
+# 旧 insta_ray.db を使い続ける。長く運用しているほど実体は旧名のまま。
+# 実際にこれで「設定したのに出ない」を踏んだので、両方を探すようにしてある。
+OLDNAME_DIR = os.path.join(BASE, "oldname")
+os.makedirs(os.path.join(OLDNAME_DIR, "cache"), exist_ok=True)
+shutil.copy(IG_DB, os.path.join(OLDNAME_DIR, "insta_ray.db"))
+shutil.copytree(IG_CACHE, os.path.join(OLDNAME_DIR, "cache"), dirs_exist_ok=True)
+
+def _probe_env(db_path, cache_dir):
+    e = dict(os.environ)
+    e["IG_DB_PATH"] = db_path
+    e["IG_CACHE_DIR"] = cache_dir
+    code = f"""
+import sys
+sys.path.insert(0, {str(APP)!r})
+import ig_bridge, web
+print("RESOLVED", ig_bridge.IG_DB_PATH)
+print("REASON", ig_bridge.IG_DB_REASON)
+h = web.app.test_client().get("/?source=ig").get_data(as_text=True)
+print("HASIG", "caption of IGAAA" in h)
+print("WARN", 'class="src-warn"' in h)
+"""
+    return subprocess.run([sys.executable, "-c", code], capture_output=True,
+                          env=e, text=True, timeout=120).stdout
+
+# 新名を指定しているのに実体は旧名、という今回踏んだ状況
+out = _probe_env(os.path.join(OLDNAME_DIR, "ig_ray.db"),
+                 os.path.join(OLDNAME_DIR, "cache"))
+check("新名指定・実体が旧名でも読める", "HASIG True" in out, out.strip()[:200])
+check("旧名に解決される", "insta_ray.db" in out, out.strip()[:200])
+check("読めているので警告は出ない", "WARN False" in out, out.strip()[:200])
+
+# 指定なしでもマウント先から見つける
+out = _probe_env("", os.path.join(OLDNAME_DIR, "cache"))
+check("IG_DB_PATH未設定でも見つける", "HASIG True" in out, out.strip()[:200])
+
+# 本当に無いときは理由を出す
+out = _probe_env(os.path.join(BASE, "empty", "ig_ray.db"),
+                 os.path.join(BASE, "empty", "cache"))
+check("本当に無いときは警告を出す", "WARN True" in out, out.strip()[:200])
+check("理由が空でない", "REASON \n" not in out and "REASON" in out,
+      [l for l in out.splitlines() if l.startswith("REASON")])
+
 print("\n== [8] WALが残っていても読める ==")
 # ig-ray が落ちて -wal だけ残った状態。読み取り専用マウントだと開けないので
 # 書き込み可マウント＋query_only にしてある、という設計の裏付け。

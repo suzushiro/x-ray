@@ -13,7 +13,11 @@
                     {% if current_source == key %}selected{% endif %}>{{ label }}</option>
             {% endfor %}
         </select>
-        {% if not ig_available %}<span class="src-warn" title="ig-rayのDBを読めていません">⚠</span>{% endif %}
+        {% if not ig_available %}
+        {# 理由まで出す。「読めていない」だけだと画面から原因が分からない。 #}
+        <span class="src-warn"
+              title="IGアーカイブを読めていません: {{ ig_error or '原因不明' }}">⚠</span>
+        {% endif %}
     </span>
     {% endif %}
     <a href="/gallery" class="{% if active_page == 'gallery' %}active{% endif %}">🖼 ギャラリー</a>

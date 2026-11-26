@@ -413,7 +413,15 @@ IG_CACHE_DIR=/ig-data/cache
 ```
 
 `IG_RAY_DATA_DIR` はホスト側のパス、残り2つは**コンテナ内から見たパス**
-（`/ig-data` にマウントされる）。`IG_DB_PATH` を空にすると統合は無効になる。
+（`/ig-data` にマウントされる）。
+
+**DBのファイル名は自動で探す。** ig-ray は v4.1 で `ig_ray.db` に改名したが、
+既存DBは作り直さず旧 `insta_ray.db` を使い続ける仕様なので、長く運用している
+環境では実体が旧名のままになる。`ig_ray.db` → `insta_ray.db` の順に探すので、
+`IG_DB_PATH` は空のままでもマウント先から見つかる。
+見つからないときはナビの ⚠ にカーソルを乗せると理由が出る。
+
+統合を無効にするには `IG_RAY_DATA_DIR` を空にする。
 
 ```bash
 docker compose build web && docker compose up -d web

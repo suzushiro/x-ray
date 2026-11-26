@@ -63,7 +63,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "44"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "45"
 
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
@@ -110,6 +110,7 @@ def _inject_share_flag():
         "tumblr_draft_threshold": TUMBLR_DRAFT_THRESHOLD,
         "app_version": APP_VERSION,
         "ig_configured": ig_bridge.configured(),
+        "ig_error": ig_bridge.IG_LAST_ERROR or ig_bridge.IG_DB_REASON,
     }
 
 

@@ -34,8 +34,56 @@ import os
 import sqlite3
 
 # ig-ray の DB とメディア置き場。未設定なら統合そのものを無効にする。
-IG_DB_PATH = os.environ.get("IG_DB_PATH", "").strip()
+_CONFIGURED_DB_PATH = os.environ.get("IG_DB_PATH", "").strip()
 IG_CACHE_DIR = os.environ.get("IG_CACHE_DIR", "").strip()
+
+# DBのファイル名の候補。ig-ray は v4.1 で ig_ray.db に改名したが、
+# **既存DBを勝手に作り直さない**仕様で、新名が無く旧 insta_ray.db があれば
+# そちらを使い続ける。つまり長く運用しているほど実体は旧名のままになる。
+# 設定ミスではなく仕様なので、こちらが両方を見に行く。
+_DB_NAMES = ("ig_ray.db", "insta_ray.db")
+
+
+def _resolve_db_path(configured, cache_dir):
+    """
+    実際に読むDBのパスを決める。戻り値は (パス, 画面に出す理由)。
+
+    パスが決まらなかったときだけ理由を返す。黙って無効になると
+    「設定したのに出ない」の原因が画面から分からない。
+    """
+    if configured and os.path.isfile(configured):
+        return configured, ""
+
+    # 探す場所: 指定があればその隣、無ければキャッシュの親（＝マウント先）
+    roots = []
+    if configured:
+        roots.append(configured if os.path.isdir(configured)
+                     else os.path.dirname(configured))
+    if cache_dir:
+        roots.append(os.path.dirname(cache_dir.rstrip("/")))
+    roots.append("/ig-data")
+
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for name in _DB_NAMES:
+            cand = os.path.join(root, name)
+            if os.path.isfile(cand):
+                if configured and cand != configured:
+                    print(f"[*] IG: 指定の {configured} が無いので "
+                          f"{cand} を使います")
+                return cand, ""
+
+    if configured:
+        return "", (f"{configured} が見つかりません"
+                    f"（{' / '.join(_DB_NAMES)} も探しましたが見当たりません）")
+    return "", "IG_DB_PATH が未設定で、DBも自動で見つかりませんでした"
+
+
+IG_DB_PATH, IG_DB_REASON = _resolve_db_path(_CONFIGURED_DB_PATH, IG_CACHE_DIR)
+
+# attach が失敗したときの理由。画面の警告に出す。
+IG_LAST_ERROR = ""
 
 # ig-ray 側が巡回中だとロックを握っていることがあるので少し待つ
 IG_BUSY_TIMEOUT_MS = int(os.environ.get("IG_BUSY_TIMEOUT_MS", "5000") or 5000)
@@ -52,8 +100,13 @@ ID_PREFIX = "ig:"
 
 
 def configured():
-    """統合が有効に設定されているか（ファイルの実在は見ない）"""
-    return bool(IG_DB_PATH)
+    """
+    統合を使うつもりがあるか。
+
+    IG_DB_PATH を書いたか、マウント先にDBが見つかったかのどちらか。
+    「つもりはあるが読めていない」を画面で言えるよう、実在とは分けている。
+    """
+    return bool(IG_DB_PATH or _CONFIGURED_DB_PATH)
 
 
 def available():
@@ -79,16 +132,20 @@ def attach(conn):
     成功したら True。失敗しても例外は投げない（IGが読めないだけで
     X-Ray のタイムラインは出したい）。
     """
+    global IG_LAST_ERROR
     if not available():
+        IG_LAST_ERROR = IG_DB_REASON or "DBが見つかりません"
         return False
     try:
         conn.execute(f"PRAGMA busy_timeout = {IG_BUSY_TIMEOUT_MS}")
         conn.execute("ATTACH DATABASE ? AS " + SCHEMA, (IG_DB_PATH,))
         # ATTACH の後に立てる。先に立てると -shm を作れず WAL が開けない。
         conn.execute("PRAGMA query_only = 1")
+        IG_LAST_ERROR = ""
         return True
     except Exception as e:
-        print(f"[!] IGアーカイブに接続できません: {type(e).__name__}: {e}")
+        IG_LAST_ERROR = f"{type(e).__name__}: {e}"
+        print(f"[!] IGアーカイブに接続できません: {IG_LAST_ERROR}")
         return False
 
 
