@@ -18,6 +18,7 @@ from db import get_conn
 import seed_accounts
 import cache_utils
 import tumblr_client
+import ig_bridge
 
 # Tumblr共有ページを外部公開する際のベースURL（例: https://share.example.com）。
 # 未設定なら共有機能は無効。X-Ray本体ではなく /share/<token> だけを
@@ -62,7 +63,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "41"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "53"
 
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
@@ -108,6 +109,8 @@ def _inject_share_flag():
         "tumblr_enabled": tumblr_client.is_configured(),
         "tumblr_draft_threshold": TUMBLR_DRAFT_THRESHOLD,
         "app_version": APP_VERSION,
+        "ig_configured": ig_bridge.configured(),
+        "ig_error": ig_bridge.IG_LAST_ERROR or ig_bridge.IG_DB_REASON,
     }
 
 
@@ -121,11 +124,35 @@ def db():
     return g.conn
 
 
+def db_ro():
+    """
+    IGアーカイブを繋いだ**読み取り専用**コネクション。
+
+    `db()` と分けてあるのは、ig_bridge.attach() が `PRAGMA query_only` を
+    立てるため。書き込みのあるルートで使うと X-Ray 側の更新まで弾かれる。
+    タイムラインやギャラリーのような読むだけの画面で使う。
+
+    IGが読めないときは素の（ATTACHしていない）コネクションを返す。
+    その場合 `g.ig_on` が False になるので、呼び出し側はX側だけで組み立てる。
+    """
+    if "conn_ro" not in g:
+        conn = get_conn()
+        g.ig_on = ig_bridge.attach(conn)
+        g.conn_ro = conn
+    return g.conn_ro
+
+
+def ig_on():
+    """このリクエストでIGアーカイブが読めているか"""
+    return bool(g.get("ig_on"))
+
+
 @app.teardown_appcontext
 def close_db(exc):
-    conn = g.pop("conn", None)
-    if conn is not None:
-        conn.close()
+    for key in ("conn", "conn_ro"):
+        conn = g.pop(key, None)
+        if conn is not None:
+            conn.close()
 
 
 def page_arg(name="page"):
@@ -159,29 +186,33 @@ def get_categories():
     return categories
 
 
-_counts_cache = {"at": 0.0, "counts": None, "total": 0}
+# 出自（all / x / ig）ごとに件数をキャッシュする
+_counts_cache = {}
 COUNTS_TTL = 60  # 秒
 
 
-def get_category_counts(conn, categories_list):
+def get_category_counts(conn, categories_list, source="all"):
     """
     カテゴリ別ツイート件数。
     以前はカテゴリ数ぶんCOUNT+LIKEをループしていた（categoriesはJSON文字列なので
     インデックスが効かず毎回フルスキャン×N回）。1クエリに畳んだうえで60秒キャッシュする。
     """
     now = time.time()
-    if _counts_cache["counts"] is not None and now - _counts_cache["at"] < COUNTS_TTL:
-        return _counts_cache["counts"], _counts_cache["total"]
+    # キャッシュは出自ごとに分ける。混ぜると X だけ選んだときに
+    # 混合の件数が出てしまう。
+    cached = _counts_cache.get(source)
+    if cached and now - cached["at"] < COUNTS_TTL:
+        return cached["counts"], cached["total"]
 
     counts = {c: 0 for c in categories_list}
     total = 0
     # accounts.categories の組み合わせは高々アカウント数ぶんしか無いのでGROUP BYで畳める
-    for r in conn.execute("""
+    for r in ([] if source == "ig" else conn.execute("""
         SELECT a.categories AS cats, COUNT(*) AS cnt
         FROM tweets t
         JOIN accounts a ON t.screen_name = a.screen_name
         GROUP BY a.categories
-    """):
+    """)):
         total += r["cnt"]
         try:
             for c in json.loads(r["cats"] or "[]"):
@@ -190,7 +221,30 @@ def get_category_counts(conn, categories_list):
         except Exception:
             pass
 
-    _counts_cache.update({"at": now, "counts": counts, "total": total})
+    # IGアーカイブぶんも足す。表示には出ているのに件数に入っていないと
+    # 「photographer 0件」なのに写真が並ぶ、という食い違いになる。
+    if ig_on() and source != "x":
+        try:
+            hide_sql, params = ig_bridge.hidden_owner_sql(conn)
+            where = f"WHERE {hide_sql} " if hide_sql else ""
+            for r in conn.execute(f"""
+                SELECT a.categories_json AS cats, COUNT(*) AS cnt
+                FROM {ig_bridge.SCHEMA}.posts p
+                LEFT JOIN {ig_bridge.SCHEMA}.accounts a
+                       ON p.owner_username = a.username
+                {where}GROUP BY a.categories_json
+            """, params):
+                total += r["cnt"]
+                try:
+                    for c in json.loads(r["cats"] or "[]"):
+                        if c in counts:
+                            counts[c] += r["cnt"]
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[!] IGの件数集計に失敗: {type(e).__name__}: {e}")
+
+    _counts_cache[source] = {"at": now, "counts": counts, "total": total}
     return counts, total
 
 
@@ -205,6 +259,10 @@ def get_bookmarked_ids(conn):
 
 def format_tweet(d, bookmarked_ids=None, deleted=None):
     """DBの行dict（tweets JOIN accounts想定）を表示用に整形する"""
+    # 出自。タイムラインのSQLは列で持ってくるが、ブックマーク表のように
+    # 列が無い経路もあるので tweet_id の接頭辞から補う。
+    if not d.get("source"):
+        d["source"] = "ig" if ig_bridge.is_ig_id(d.get("tweet_id")) else "x"
     d["media"] = json.loads(d.get("media_json") or "[]")
     d["videos"] = json.loads(d.get("video_json") or "[]")
     d["local_media"] = json.loads(d.get("local_media_json") or "[]")
@@ -278,6 +336,21 @@ def format_tweet(d, bookmarked_ids=None, deleted=None):
     return d
 
 
+@app.route("/ig-cache/<path:filename>")
+def serve_ig_cache(filename):
+    """
+    IG-Ray 側のキャッシュ画像を配信する。
+
+    ig-ray も自分では `/cache/` で配っているが、**X-Ray の `/cache/` と
+    衝突する**ので別のパスに載せ替えてある。実体は ig-ray の data を
+    マウントしたディレクトリで、こちらからは読むだけ。
+    """
+    if not ig_bridge.IG_CACHE_DIR:
+        from flask import abort
+        abort(404)
+    return send_from_directory(ig_bridge.IG_CACHE_DIR, filename)
+
+
 @app.route("/images/<path:filename>")
 def serve_image(filename):
     """永続画像を配信。無ければキャッシュ側にフォールバック。"""
@@ -297,44 +370,219 @@ def serve_cache(filename):
     return send_from_directory(CACHE_DIR, filename)
 
 
+# タイムラインで使う列。X と IG で**同じ並び**にする必要がある
+# （UNION ALL は列名ではなく位置で対応するため）。
+TL_COLUMNS = """
+    source, tweet_id, screen_name, display_name, content, created_at, url,
+    like_count, retweet_count, reply_count, media_json, video_json,
+    local_media_json, categories, profile_image_url, reply_to_tweet_id,
+    quoted_json
+"""
+
+# 並び替えのキー。created_at をそのまま文字列比較してはいけない。
+# X と IG で保存形式のオフセットが揃っておらず（+09:00 と +00:00 が混在しうる）、
+# 素の文字列ソートだと時系列が狂う。strftime はオフセットを畳んで UTC に
+# 正規化するので、これを通した値で並べる。
+TL_ORDER = "strftime('%Y-%m-%dT%H:%M:%S', created_at)"
+
+
+def _x_timeline_sql(category, show_r18=False, require_media=False):
+    """X側の1件分のSELECT。列は TL_COLUMNS と同じ並び。"""
+    # カテゴリを選んでいるときは R18 で追加の絞り込みをしない（既存の挙動）。
+    # 「all のときだけ R18 を伏せる」が元からの仕様で、タブで R18 を選べば出る。
+    where, params = [], []
+    if category == "all":
+        if not show_r18:
+            where.append("a.categories NOT LIKE '%\"R18\"%'")
+    else:
+        where.append("a.categories LIKE ?")
+        params.append(f'%"{category}"%')
+    if require_media:
+        where.append("t.media_json IS NOT NULL AND t.media_json != '[]'")
+    where = " AND ".join(where) or "1=1"
+    sql = f"""
+        SELECT 'x' AS source, t.tweet_id, t.screen_name, a.display_name,
+               t.content, t.created_at, t.url, t.like_count, t.retweet_count,
+               t.reply_count, t.media_json, t.video_json, t.local_media_json,
+               a.categories, a.profile_image_url, t.reply_to_tweet_id,
+               t.quoted_json
+        FROM tweets t
+        JOIN accounts a ON t.screen_name = a.screen_name
+        WHERE {where}
+    """
+    return sql, params
+
+
+# タイムラインに出す出自。IGの取得は止まっているので混ぜるだけだと
+# 新しいXの投稿に押し流されて何百ページも奥に行ってしまう。切り替えを用意する。
+SOURCES = ("all", "x", "ig")
+
+
+def source_arg():
+    v = (request.args.get("source") or "all").strip().lower()
+    return v if v in SOURCES else "all"
+
+
+def timeline_rows(conn, category, limit, offset, show_r18=False,
+                  require_media=False, source="all"):
+    """
+    X と IG を時系列に混ぜた1ページぶんの行を返す。
+
+    source="x" / "ig" で片方だけに絞れる。
+
+    IGが読めないときはX側だけ。ig-ray 側の事情でこちらが落ちないよう、
+    混合クエリが失敗したらX単独にフォールバックする。
+    """
+    x_sql, x_params = _x_timeline_sql(category, show_r18, require_media)
+
+    if source == "ig":
+        if not ig_on():
+            return []
+        ig_sql, ig_params = ig_bridge.select_sql(
+            conn, category=category, show_r18=show_r18,
+            require_media=require_media)
+        sql = (f"SELECT * FROM ( SELECT {TL_COLUMNS} FROM ( {ig_sql} ) ) "
+               f"ORDER BY {TL_ORDER} DESC LIMIT ? OFFSET ?")
+        try:
+            return [dict(r) for r in conn.execute(
+                sql, (*ig_params, limit, offset)).fetchall()]
+        except Exception as e:
+            print(f"[!] IGのタイムラインに失敗: {type(e).__name__}: {e}")
+            return []
+
+    if source == "all" and ig_on():
+        ig_sql, ig_params = ig_bridge.select_sql(
+            conn, category=category, show_r18=show_r18,
+            require_media=require_media)
+        # UNION の ORDER BY には式を書けない（SQLiteは結果列の名前か番号しか
+        # 受け付けない）。外側のSELECTで包んでから並べ替える。
+        merged = f"""
+            SELECT * FROM (
+                SELECT {TL_COLUMNS} FROM ( {x_sql} )
+                UNION ALL
+                SELECT {TL_COLUMNS} FROM ( {ig_sql} )
+            )
+            ORDER BY {TL_ORDER} DESC
+            LIMIT ? OFFSET ?
+        """
+        try:
+            return [dict(r) for r in conn.execute(
+                merged, (*x_params, *ig_params, limit, offset)).fetchall()]
+        except Exception as e:
+            print(f"[!] IGを混ぜたタイムラインに失敗（X単独で続行）: "
+                  f"{type(e).__name__}: {e}")
+
+    sql = (f"SELECT * FROM ( SELECT {TL_COLUMNS} FROM ( {x_sql} ) ) "
+           f"ORDER BY {TL_ORDER} DESC LIMIT ? OFFSET ?")
+    return [dict(r) for r in conn.execute(
+        sql, (*x_params, limit, offset)).fetchall()]
+
+
+# 取得が「黙って止まる」のを原因に関係なく見張るしきい値（時間）。
+# 出口IPの判定で12日止まったとき、入れたのは「出口の異常をログに残す」で、
+# 原因を1つ塞いだだけだった。想定していない死に方は必ず残るので、
+# **最後に取れた時刻だけ**を見る見張りを別に置く。
+# 15分巡回なので3時間＝12回ぶん空いたら異常とみなす。Xの一時的な不調で
+# 鳴らない程度には鈍く、半日放置はしない程度には敏感な値として選んだ。
+try:
+    STALE_HOURS = float(os.environ.get("SCRAPE_STALE_HOURS", "3") or 3)
+except ValueError:
+    print("[!] SCRAPE_STALE_HOURS が数値ではありません（既定の3を使います）")
+    STALE_HOURS = 3.0
+
+
+def _utc_key(d):
+    """表示用の行を時系列に並べるためのキー。
+
+    created_at のオフセットが X と IG で揃っていないので、
+    文字列のままでは比較できない（UTCに直してから比べる）。
+    """
+    try:
+        t = datetime.fromisoformat(str(d.get("created_at") or "").replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return t
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+# IG側の見張り。巡回間隔（秒）の何倍で異常とみなすか。
+try:
+    IG_INTERVAL_SEC = float(os.environ.get("IG_RAY_INTERVAL", "21600") or 21600)
+    IG_STALE_INTERVALS = float(os.environ.get("IG_RAY_STALE_INTERVALS", "3") or 3)
+except ValueError:
+    IG_INTERVAL_SEC, IG_STALE_INTERVALS = 21600.0, 3.0
+
+
+def check_stale(conn):
+    """
+    最後に取得できてからの経過を見る。異常なら dict、正常なら None。
+
+    成功ログが1件も無いときに黙って None を返してはいけない。
+    scrape_log は7日で刈られるので、**7日以上止まると成功ログごと消えて
+    「何も無い＝正常」に見えてしまう**。一番警告が要る状況で黙る。
+    そこで成功ログが無いときは保存済みツイートの取得時刻で代用する。
+    """
+    if STALE_HOURS <= 0:
+        return None
+
+    row = conn.execute(
+        "SELECT MAX(run_at) AS t FROM scrape_log "
+        "WHERE status = 'ok' AND COALESCE(screen_name,'') != ?",
+        (EGRESS_LOG_NAME,)).fetchone()
+    last, basis = (row["t"] if row else None), "log"
+
+    if not last:
+        row = conn.execute("SELECT MAX(fetched_at) AS t FROM tweets").fetchone()
+        last, basis = (row["t"] if row else None), "tweets"
+
+    if not last:
+        return None             # 1件も取ったことがない＝入れたばかり
+
+    try:
+        t = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+    hours = (datetime.now(timezone.utc) - t).total_seconds() / 3600.0
+    if hours <= STALE_HOURS:
+        return None
+    return {
+        "hours": int(hours),
+        "days": round(hours / 24, 1),
+        "since": t.astimezone(JST).strftime("%Y-%m-%d %H:%M"),
+        "limit_h": round(STALE_HOURS, 1),
+        # ログから分かったのか、ツイートの取得時刻で代用したのか。
+        # 代用のときは「ログが刈られるほど長く止まっている」の合図でもある。
+        "basis": basis,
+    }
+
+
 @app.route("/")
 def index():
     category = request.args.get("category", "all")
+    source = source_arg()
     page = page_arg()
     offset = (page - 1) * PER_PAGE
 
-    conn = db()
+    conn = db_ro()
     bookmarked_ids = get_bookmarked_ids(conn)
     deleted_media = cache_utils.deleted_urls(conn)
 
-    if category == "all":
-        rows = conn.execute("""
-            SELECT t.*, a.display_name, a.categories, a.profile_image_url
-            FROM tweets t
-            JOIN accounts a ON t.screen_name = a.screen_name
-            WHERE a.categories NOT LIKE '%"R18"%'
-            ORDER BY t.created_at DESC
-            LIMIT ? OFFSET ?
-        """, (PER_PAGE + 1, offset)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT t.*, a.display_name, a.categories, a.profile_image_url
-            FROM tweets t
-            JOIN accounts a ON t.screen_name = a.screen_name
-            WHERE a.categories LIKE ?
-            ORDER BY t.created_at DESC
-            LIMIT ? OFFSET ?
-        """, (f'%"{category}"%', PER_PAGE + 1, offset)).fetchall()
+    rows = timeline_rows(conn, category, PER_PAGE + 1, offset, source=source)
 
     # PER_PAGE+1件取得して、次ページがあるか判定
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
 
-    tweets = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
+    rows = ig_bridge.attach_media(conn, rows) if ig_on() else rows
+    tweets = [format_tweet(r, bookmarked_ids, deleted_media) for r in rows]
 
     # 各カテゴリの件数（タブのバッジ用）
     categories_list = get_categories()
-    counts, total_count = get_category_counts(conn, categories_list)
+    counts, total_count = get_category_counts(conn, categories_list, source)
 
     last_run = conn.execute("""
         SELECT run_at FROM scrape_log ORDER BY run_at DESC LIMIT 1
@@ -348,6 +596,11 @@ def index():
             last_run_jst = dt_utc.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
         except Exception:
             last_run_jst = last_run["run_at"][:16].replace("T", " ") + " UTC"
+
+    stale = check_stale(conn)
+    # IG取得側の健康状態。取り込んだ以上、こちらが出さないと誰も気づけない。
+    ig_health = (ig_bridge.health(conn, IG_INTERVAL_SEC, IG_STALE_INTERVALS)
+                 if ig_on() else None)
 
     # ヘルス情報: 直近1時間のスクレイプログを集計
     health = conn.execute("""
@@ -397,7 +650,8 @@ def index():
                     reply_ids.add(t["tweet_id"])
     tweet_items = [t for t in tweets if t["tweet_id"] not in reply_ids]
 
-    next_url = url_for("index", category=category, page=page + 1) if has_next else None
+    next_url = url_for("index", category=category, page=page + 1,
+                       source=source) if has_next else None
     if request.args.get("partial") == "1":
         return render_template("_feed.html", tweets=tweet_items, next_url=next_url)
 
@@ -407,12 +661,16 @@ def index():
         next_url=next_url,
         categories=categories_list,
         current_category=category,
+        current_source=source,
+        ig_available=ig_on(),
         counts=counts,
         total_count=total_count,
         last_run_jst=last_run_jst,
         health=dict(health) if health else None,
         error_accounts=[dict(a) for a in error_accounts],
         egress_alert=dict(egress_alert) if egress_alert else None,
+        stale=stale,
+        ig_health=ig_health,
         page=page,
         has_next=has_next,
     )
@@ -593,6 +851,10 @@ def api_bookmark_toggle():
         conn.commit()
         return jsonify({"ok": True, "bookmarked": False})
 
+    # IG の投稿は ig-ray のDBから内容をコピーする。**向こうには書かない。**
+    if ig_bridge.is_ig_id(tweet_id):
+        return _bookmark_ig(conn, tweet_id)
+
     # ツイート本体を取得してコピー保存
     row = conn.execute("""
         SELECT t.*, a.display_name, a.categories, a.profile_image_url
@@ -634,6 +896,113 @@ def api_bookmark_toggle():
     ))
     conn.commit()
     return jsonify({"ok": True, "bookmarked": True, "promoted": promoted})
+
+
+def _bookmarked_ig_paths(tweet_id, indices=None):
+    """
+    X-Ray にブックマークしてある IG 投稿から、添付できる実ファイルを返す。
+
+    ig-ray 側の保持期間で元が消えても、ブックマーク時に実体を
+    X-Ray の永続領域へコピーしてあるので投稿できる。
+    戻り値: (paths, source_url, screen_name)
+    """
+    row = db().execute(
+        "SELECT url, screen_name, local_media_json FROM bookmarks "
+        "WHERE tweet_id=?", (tweet_id,)).fetchone()
+    if not row:
+        return [], "", ""
+    try:
+        locals_ = json.loads(row["local_media_json"] or "[]")
+    except (TypeError, ValueError):
+        locals_ = []
+    order = [i for i, p in enumerate(locals_) if p]
+    if indices is not None:
+        order = [i for i in indices if i in order]
+    paths = []
+    for i in order:
+        fp = os.path.join(IMAGES_DIR, os.path.basename(locals_[i]))
+        if os.path.exists(fp) and fp not in paths:
+            paths.append(fp)
+    return (paths, row["url"] or "",
+            ig_bridge.ID_PREFIX + (row["screen_name"] or ""))
+
+
+def _bookmark_ig(conn, tweet_id):
+    """
+    IG の投稿を X-Ray のブックマークにコピーする。
+
+    画像は **X-Ray 側の永続領域に実体をコピーする。**
+    ig-ray のキャッシュは向こうの保持期間で消えるので、参照だけ持つと
+    「ブックマークしたのに画像が消える」になる。X 側のブックマークが
+    キャッシュから永続へ昇格させているのと同じ考え方。
+    コピー先は X-Ray の持ち物なので、読み取り専用の前提は崩れない。
+    """
+    ro = db_ro()
+    if not ig_on():
+        return jsonify({"ok": False, "error": "IGアーカイブを読めません"}), 400
+
+    code = ig_bridge.shortcode_of(tweet_id)
+    S = ig_bridge.SCHEMA
+    row = ro.execute(
+        f"SELECT p.shortcode, p.owner_username, p.caption, p.date_utc, p.likes,"
+        f" p.comments, p.media_json, a.full_name, a.categories_json,"
+        f" a.profile_pic_local "
+        f"FROM {S}.posts p LEFT JOIN {S}.accounts a"
+        f" ON p.owner_username = a.username WHERE p.shortcode = ?",
+        (code,)).fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "投稿が見つかりません"}), 404
+
+    try:
+        media = json.loads(row["media_json"] or "[]")
+    except (TypeError, ValueError):
+        media = []
+    remotes = [m.get("image_url") or "" for m in media if isinstance(m, dict)]
+
+    # ローカル実体を X-Ray の永続領域へコピー
+    locals_out, copied = [], 0
+    by_index = {}
+    for r in ro.execute(
+        f"SELECT media_index, local_path FROM {S}.media_index WHERE shortcode=?",
+        (code,)
+    ):
+        if r["local_path"]:
+            by_index[r["media_index"]] = r["local_path"]
+
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    for i, m in enumerate(media):
+        idx = m.get("index", i) if isinstance(m, dict) else i
+        src = ig_bridge.local_file(by_index.get(idx, ""))
+        if not src:
+            locals_out.append(None)
+            continue
+        ext = os.path.splitext(src)[1] or ".jpg"
+        name = f"ig_{code}_{idx}{ext}"
+        dst = os.path.join(IMAGES_DIR, name)
+        try:
+            if not os.path.exists(dst):
+                shutil.copyfile(src, dst)
+                copied += 1
+            locals_out.append(f"/images/{name}")
+        except Exception as e:
+            print(f"[!] IG画像のコピーに失敗 {src}: {type(e).__name__}: {e}")
+            locals_out.append(None)
+
+    conn.execute("""
+        INSERT INTO bookmarks
+        (tweet_id, screen_name, display_name, content, created_at, url,
+         media_json, local_media_json, video_json, categories,
+         profile_image_url, quoted_json, bookmarked_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (tweet_id, row["owner_username"],
+          row["full_name"] or row["owner_username"], row["caption"],
+          row["date_utc"], f"{ig_bridge.POST_URL_PREFIX}{code}/",
+          json.dumps(remotes, ensure_ascii=False),
+          json.dumps(locals_out, ensure_ascii=False),
+          None, row["categories_json"], row["profile_pic_local"], None,
+          datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    return jsonify({"ok": True, "bookmarked": True, "promoted": copied})
 
 
 def _purge_expired_shares(conn):
@@ -825,6 +1194,52 @@ def api_tumblr_accounts():
                     "accounts": tumblr_client.public_accounts()})
 
 
+@app.route("/api/ig/mute", methods=["POST"])
+def api_ig_mute():
+    """
+    IG の投稿主をミュートする／解除する。
+
+    **ig-ray の accounts.is_muted を直接書く**ので、向こうの画面とも揃う。
+    書き込みは読み取りとは別の接続で行う（読む側は query_only のまま）。
+    """
+    username = (request.form.get("username") or "").strip().lstrip("@")
+    username = ig_bridge.shortcode_of(username) or username   # ig: が付いていても受ける
+    if not username:
+        return jsonify({"ok": False, "error": "usernameが必要です"}), 400
+    if not ig_bridge.available():
+        return jsonify({"ok": False, "error": "IGアーカイブを読めません"}), 400
+
+    raw = (request.form.get("muted") or "").strip().lower()
+    if raw in ("1", "true", "on", "yes"):
+        target = True
+    elif raw in ("0", "false", "off", "no"):
+        target = False
+    else:
+        # 明示されていなければ今の状態を反転する
+        ro = db_ro()
+        cur = False
+        if ig_on():
+            r = ro.execute(
+                f"SELECT COALESCE(is_muted,0) AS m FROM {ig_bridge.SCHEMA}.accounts "
+                "WHERE username=?", (username,)).fetchone()
+            cur = bool(r["m"]) if r else False
+        target = not cur
+
+    if not ig_bridge.set_mute(username, target,
+                              request.form.get("reason") or None):
+        return jsonify({"ok": False, "error": "ミュートを変更できませんでした"}), 500
+    return jsonify({"ok": True, "muted": target, "username": username})
+
+
+@app.route("/ig-mutes")
+def ig_mutes():
+    """ミュート中のIGアカウント一覧。解除もここから。"""
+    conn = db_ro()
+    accounts = ig_bridge.muted_accounts(conn) if ig_on() else []
+    return render_template("ig_mutes.html", accounts=accounts,
+                           ig_available=ig_on())
+
+
 @app.route("/api/tumblr/presets")
 def api_tumblr_presets():
     """
@@ -835,9 +1250,26 @@ def api_tumblr_presets():
     conn = db()
     rows = conn.execute(
         "SELECT screen_name, caption, tags FROM tumblr_presets").fetchall()
-    return jsonify({"ok": True, "presets": {
-        r["screen_name"]: {"caption": r["caption"], "tags": r["tags"]} for r in rows
-    }})
+    presets = {r["screen_name"]: {"caption": r["caption"], "tags": r["tags"]}
+               for r in rows}
+
+    # ig-ray 側で既に編集したぶんを引き継ぐ。X-Ray に無いものだけ。
+    # 一度 X-Ray から投稿すれば X-Ray 側に保存され、以後はそちらが使われる。
+    ro = db_ro()
+    if ig_on():
+        try:
+            for r in ro.execute(
+                f"SELECT owner_username, caption, tags "
+                f"FROM {ig_bridge.SCHEMA}.tumblr_presets"
+            ):
+                key = ig_bridge.ID_PREFIX + r["owner_username"]
+                if key not in presets:
+                    presets[key] = {"caption": r["caption"] or "",
+                                    "tags": r["tags"] or ""}
+        except Exception:
+            pass          # 古い ig-ray にはこのテーブルが無い
+
+    return jsonify({"ok": True, "presets": presets})
 
 
 @app.route("/api/tumblr/preset/delete", methods=["POST"])
@@ -880,6 +1312,9 @@ def api_tumblr_post():
     if not tweet_id:
         return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
 
+    # IGの投稿も投稿できる。IG側のDBには一切書かず、読んだ画像を送るだけ。
+    is_ig = ig_bridge.is_ig_id(tweet_id)
+
     account = tumblr_client.find_account((request.form.get("account") or "").strip())
     if not account:
         return jsonify({"ok": False, "error": "投稿先アカウントが見つかりません"}), 400
@@ -909,19 +1344,40 @@ def api_tumblr_post():
         if not indices:
             return jsonify({"ok": False, "error": "画像が選択されていません"}), 400
 
-    conn = db()
-    paths = _local_image_paths(tweet_id, conn, indices)
-    if not paths:
-        return jsonify({"ok": False, "error": "投稿できるローカル画像がありません"}), 400
-
-    row = conn.execute("SELECT url, screen_name FROM tweets WHERE tweet_id=?",
-                       (tweet_id,)).fetchone()
-    if not row:
-        row = conn.execute("SELECT url, screen_name FROM bookmarks WHERE tweet_id=?",
+    if is_ig:
+        # IG は読み取り専用の接続で引く（query_only が立っている）
+        ig_conn = db_ro()
+        if not ig_on():
+            return jsonify({"ok": False,
+                            "error": "IGアーカイブを読めません"}), 400
+        info = ig_bridge.post_info(ig_conn, tweet_id, indices)
+        if info and info["paths"]:
+            paths, source_url = info["paths"], info["source_url"]
+            screen_name = ig_bridge.ID_PREFIX + info["owner"]
+        else:
+            # ig-ray 側から消えていても、X-Ray にブックマークしてあれば
+            # 画像の実体はこちらにコピーしてあるので投稿できる。
+            paths, source_url, screen_name = _bookmarked_ig_paths(
+                tweet_id, indices)
+            if not paths:
+                return jsonify(
+                    {"ok": False,
+                     "error": "ローカルに保存された画像がありません"}), 400
+    else:
+        conn = db()
+        paths = _local_image_paths(tweet_id, conn, indices)
+        if not paths:
+            return jsonify({"ok": False,
+                            "error": "投稿できるローカル画像がありません"}), 400
+        row = conn.execute("SELECT url, screen_name FROM tweets WHERE tweet_id=?",
                            (tweet_id,)).fetchone()
-    source_url = row["url"] if row else ""
-    # 覚えておくキーは投稿主。クライアントの申告ではなくDBから引く。
-    screen_name = (row["screen_name"] if row else "") or ""
+        if not row:
+            row = conn.execute(
+                "SELECT url, screen_name FROM bookmarks WHERE tweet_id=?",
+                (tweet_id,)).fetchone()
+        source_url = row["url"] if row else ""
+        # 覚えておくキーは投稿主。クライアントの申告ではなくDBから引く。
+        screen_name = (row["screen_name"] if row else "") or ""
 
     raw_caption = (request.form.get("caption") or "").strip()
     raw_tags = (request.form.get("tags") or "").strip()
@@ -939,8 +1395,10 @@ def api_tumblr_post():
         return jsonify(res), 502
 
     # 投稿が通ってから覚える。失敗した内容を残すと次回それが出てきて紛らわしい。
+    # **保存先は常に X-Ray 側のDB。** IG の投稿でも ig-ray のDBには書かない
+    # （読み取り専用を崩さないため）。キーは ig: 付きなので衝突しない。
     try:
-        _save_tumblr_preset(conn, screen_name, raw_caption, raw_tags)
+        _save_tumblr_preset(db(), screen_name, raw_caption, raw_tags)
     except Exception as e:
         # 覚えられなくても投稿自体は成功している。ここで500にはしない。
         print(f"[!] Tumblrプリセットの保存に失敗: {e}")
@@ -964,6 +1422,13 @@ def api_media_delete():
     tweet_id = (request.form.get("tweet_id") or "").strip()
     if not tweet_id:
         return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
+
+    if ig_bridge.is_ig_id(tweet_id):
+        # IGアーカイブは読むだけ。ここから先はXのテーブルを前提にしているので
+        # 通すとデータを壊す。画面側でもボタンを出していないが、
+        # 直接叩かれても拒否する。
+        return jsonify({"ok": False,
+                        "error": "IGの投稿はX-Rayからは変更できません"}), 400
 
     conn = db()
     delete_all = (request.form.get("all") or "").strip().lower() in ("1", "true", "on", "yes")
@@ -998,6 +1463,9 @@ def bookmarks():
     tweets = []
     for r in rows:
         d = dict(r)
+        # 出自。この画面は format_tweet を通さず自前で組み立てているので
+        # ここでも補う（バッジとリンク先の出し分けに要る）。
+        d["source"] = "ig" if ig_bridge.is_ig_id(d.get("tweet_id")) else "x"
         d["media"] = json.loads(d.get("media_json") or "[]")
         d["videos"] = json.loads(d.get("video_json") or "[]")
         d["local_media"] = json.loads(d.get("local_media_json") or "[]")
@@ -1045,33 +1513,19 @@ def bookmarks():
 @app.route("/gallery")
 def gallery():
     category = request.args.get("category", "all")
+    source = source_arg()
     show_r18 = request.args.get("r18", "0") == "1"
     page = page_arg()
     offset = (page - 1) * PER_PAGE
 
-    conn = db()
+    conn = db_ro()
 
-    where = ["t.media_json IS NOT NULL", "t.media_json != '[]'"]
-    params = []
-    if not show_r18:
-        where.append("a.categories NOT LIKE '%\"R18\"%'")
-    if category != "all":
-        where.append("a.categories LIKE ?")
-        params.append(f'%"{category}"%')
-
-    where_sql = " AND ".join(where)
-    params_full = params + [PER_PAGE + 1, offset]
-    rows = conn.execute(f"""
-        SELECT t.tweet_id, t.screen_name, t.media_json, t.local_media_json,
-               t.url, t.created_at, a.display_name, a.categories
-        FROM tweets t JOIN accounts a ON t.screen_name = a.screen_name
-        WHERE {where_sql}
-        ORDER BY t.created_at DESC
-        LIMIT ? OFFSET ?
-    """, params_full).fetchall()
+    rows = timeline_rows(conn, category, PER_PAGE + 1, offset,
+                         show_r18=show_r18, require_media=True, source=source)
 
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
+    rows = ig_bridge.attach_media(conn, rows) if ig_on() else rows
 
     # 画像を平坦化（1画像=1グリッドアイテム）
     deleted = cache_utils.deleted_urls(conn)
@@ -1093,10 +1547,11 @@ def gallery():
                 "tweet_id": d["tweet_id"],
                 "idx": i + 1,                      # 何枚目か（ファイル名用）
                 "created_at": d["created_at"],
+                "source": d.get("source", "x"),
             })
 
     next_url = (
-        url_for("gallery", category=category, page=page + 1,
+        url_for("gallery", category=category, page=page + 1, source=source,
                 **({"r18": 1} if show_r18 else {})) if has_next else None
     )
     if request.args.get("partial") == "1":
@@ -1108,6 +1563,8 @@ def gallery():
         items=gallery_items,
         categories=get_categories(),
         current_category=category,
+        current_source=source,
+        ig_available=ig_on(),
         show_r18=show_r18,
         page=page,
         has_next=has_next,
@@ -1141,9 +1598,134 @@ def search():
                 WHERE t.content LIKE ?
                 ORDER BY t.created_at DESC LIMIT 200
             """, (f"%{q}%",)).fetchall()
-        results = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
+        results = [format_tweet(dict(r) | {"source": "x"},
+                                bookmarked_ids, deleted_media) for r in rows]
+
+        # IG も同じ検索語で引いて混ぜる。FTS は X 側にしか無いので LIKE。
+        # 件数が200に収まる画面なので、並べ替えは取得後にまとめて行う。
+        ro = db_ro()
+        if ig_on():
+            try:
+                hide_sql, hp = ig_bridge.hidden_owner_sql(ro)
+                where = f"AND {hide_sql} " if hide_sql else ""
+                ig_rows = [dict(r) for r in ro.execute(f"""
+                    SELECT 'ig' AS source, 'ig:' || p.shortcode AS tweet_id,
+                           p.owner_username AS screen_name,
+                           a.full_name AS display_name, p.caption AS content,
+                           p.date_utc AS created_at,
+                           '{ig_bridge.POST_URL_PREFIX}' || p.shortcode || '/' AS url,
+                           p.likes AS like_count, 0 AS retweet_count,
+                           p.comments AS reply_count, p.media_json AS media_json,
+                           NULL AS video_json, NULL AS local_media_json,
+                           a.categories_json AS categories,
+                           a.profile_pic_local AS profile_image_url,
+                           NULL AS reply_to_tweet_id, NULL AS quoted_json
+                    FROM {ig_bridge.SCHEMA}.posts p
+                    LEFT JOIN {ig_bridge.SCHEMA}.accounts a
+                           ON p.owner_username = a.username
+                    WHERE p.caption LIKE ? {where}
+                    ORDER BY {TL_ORDER} DESC LIMIT 200
+                """, [f"%{q}%", *hp]).fetchall()]
+                ig_rows = ig_bridge.attach_media(ro, ig_rows)
+                results += [format_tweet(r, bookmarked_ids, deleted_media)
+                            for r in ig_rows]
+                results.sort(key=_utc_key, reverse=True)
+                results = results[:200]
+            except Exception as e:
+                print(f"[!] IGの検索に失敗（X単独で続行）: {type(e).__name__}: {e}")
 
     return render_template("search.html", results=results, query=q, categories=get_categories())
+
+
+def _ig_user_profile(screen_name, date_from, date_to, page, offset):
+    """IG の投稿主のページ。X 用と同じ user.html を使う。"""
+    conn = db_ro()
+    if not ig_on():
+        return "IGアーカイブを読めません", 404
+    owner = ig_bridge.shortcode_of(screen_name)      # ig: を外すだけ
+    S = ig_bridge.SCHEMA
+
+    acc = conn.execute(
+        f"SELECT username, full_name, categories_json, profile_pic_local "
+        f"FROM {S}.accounts WHERE username = ?", (owner,)).fetchone()
+    if not acc:
+        return "アカウントが見つかりません", 404
+    acc = {"screen_name": screen_name,      # URL用（ig: 付き）
+           "handle": owner,                 # 画面に出す名前
+           "display_name": acc["full_name"] or owner,
+           "categories": acc["categories_json"],
+           "profile_image_url": acc["profile_pic_local"],
+           "categories_list": json.loads(acc["categories_json"] or "[]"),
+           "source": "ig"}
+
+    where, params = ["p.owner_username = ?"], [owner]
+    if date_from:
+        where.append("p.date_utc >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("p.date_utc <= ?")
+        params.append(date_to + "T23:59:59")
+    where_sql = " AND ".join(where)
+
+    # select_sql は監視対象の絞り込み込みで WHERE を埋めて返すので、
+    # ここでは投稿主が確定しているぶん素直に組み立てる。
+    rows = [dict(r) for r in conn.execute(f"""
+        SELECT 'ig' AS source, 'ig:' || p.shortcode AS tweet_id,
+               p.owner_username AS screen_name, a.full_name AS display_name,
+               p.caption AS content, p.date_utc AS created_at,
+               '{ig_bridge.POST_URL_PREFIX}' || p.shortcode || '/' AS url,
+               p.likes AS like_count, 0 AS retweet_count,
+               p.comments AS reply_count, p.media_json AS media_json,
+               NULL AS video_json, NULL AS local_media_json,
+               a.categories_json AS categories,
+               a.profile_pic_local AS profile_image_url,
+               NULL AS reply_to_tweet_id, NULL AS quoted_json
+        FROM {S}.posts p
+        LEFT JOIN {S}.accounts a ON p.owner_username = a.username
+        WHERE {where_sql}
+        ORDER BY {TL_ORDER} DESC LIMIT ? OFFSET ?
+    """, params + [PER_PAGE + 1, offset]).fetchall()]
+
+    stats = dict(conn.execute(f"""
+        SELECT COUNT(*) AS total, COALESCE(SUM(likes), 0) AS total_likes,
+               0 AS total_rts, MIN(date_utc) AS oldest, MAX(date_utc) AS newest
+        FROM {S}.posts WHERE owner_username = ?
+    """, (owner,)).fetchone() or {})
+    # is_video のような列は ig-ray 側の都合で有無が変わる。
+    # 統計が1つ欠けるだけでページごと落とさない。
+    stats["with_media"] = conn.execute(f"""
+        SELECT COALESCE(SUM(CASE WHEN media_json IS NOT NULL
+                                  AND media_json != '[]' THEN 1 ELSE 0 END), 0) AS n
+        FROM {S}.posts WHERE owner_username = ?
+    """, (owner,)).fetchone()["n"]
+    try:
+        stats["with_video"] = conn.execute(
+            f"SELECT COALESCE(SUM(is_video), 0) AS n FROM {S}.posts "
+            "WHERE owner_username = ?", (owner,)).fetchone()["n"]
+    except Exception:
+        stats["with_video"] = 0
+    stats["per_day"] = None
+    try:
+        if stats.get("oldest") and stats.get("newest") and stats.get("total"):
+            o = datetime.fromisoformat(stats["oldest"].replace("Z", "+00:00"))
+            n = datetime.fromisoformat(stats["newest"].replace("Z", "+00:00"))
+            stats["per_day"] = round(stats["total"] / max(1, (n - o).days), 1)
+            stats["oldest_jst"] = o.astimezone(JST).strftime("%Y-%m-%d")
+            stats["newest_jst"] = n.astimezone(JST).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    has_next = len(rows) > PER_PAGE
+    rows = ig_bridge.attach_media(conn, rows[:PER_PAGE])
+    tweets = [format_tweet(r, get_bookmarked_ids(conn),
+                           cache_utils.deleted_urls(conn)) for r in rows]
+    next_url = (url_for("user_profile", screen_name=screen_name, page=page + 1,
+                        **{"from": date_from, "to": date_to}) if has_next else None)
+    if request.args.get("partial") == "1":
+        return render_template("_feed.html", tweets=tweets, next_url=next_url)
+    return render_template("user.html", account=acc, tweets=tweets, stats=stats,
+                           date_from=date_from, date_to=date_to, page=page,
+                           has_next=has_next, next_url=next_url)
 
 
 @app.route("/user/<screen_name>")
@@ -1152,6 +1734,9 @@ def user_profile(screen_name):
     date_to = request.args.get("to", "")
     page = page_arg()
     offset = (page - 1) * PER_PAGE
+
+    if ig_bridge.is_ig_id(screen_name):
+        return _ig_user_profile(screen_name, date_from, date_to, page, offset)
 
     conn = db()
     bookmarked_ids = get_bookmarked_ids(conn)
@@ -1284,8 +1869,21 @@ def storage():
     tweet_count = conn.execute("SELECT COUNT(*) c FROM tweets").fetchone()["c"]
     bookmark_count = conn.execute("SELECT COUNT(*) c FROM bookmarks").fetchone()["c"]
 
+    # IGアーカイブの内訳。**容量は ig-ray 側の持ち物**なので、
+    # X-Ray の「消せば空く容量」とは混ぜずに別枠で出す。
+    ig_info = None
+    ro = db_ro()
+    if ig_on():
+        st = ig_bridge.stats(ro)
+        if st:
+            ig_size, ig_count = cache_utils.dir_stats(ig_bridge.IG_CACHE_DIR, set())
+            ig_info = {"posts": st["posts"], "accounts": st["accounts"],
+                       "size": _fmt_size(ig_size), "count": ig_count,
+                       "path": ig_bridge.IG_CACHE_DIR}
+
     return render_template(
         "storage.html",
+        ig=ig_info,
         db_size=_fmt_size(db_size),
         img_size=_fmt_size(img_size),
         img_count=img_count,

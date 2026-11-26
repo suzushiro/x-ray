@@ -23,6 +23,37 @@
             全{{ total_count }}件
             {% if last_run_jst %} ・ 最終更新: {{ last_run_jst }}{% endif %}
         </div>
+        {% if stale %}
+        {# 原因が何であれ「取れていない」ことだけを言う。
+           個別の原因を潰しても想定外の死に方は残るので、これが最後の砦。 #}
+        <div class="health health-error">
+            🛑 {{ stale.hours }}時間 取得できていません（最終 {{ stale.since }}／
+            しきい値 {{ stale.limit_h }}時間）
+            {%- if stale.basis == 'tweets' %}・実行ログが残っていないほど長く止まっています{% endif %}
+            ・ <a href="/status" class="health-link">詳細 →</a>
+        </div>
+        {% endif %}
+        {% if ig_health %}
+        {# IG取得側の異常。X側とは別に出す（原因も対処先も別のため）。 #}
+        {% if ig_health.stale %}
+        <div class="health health-error">
+            🛑 IG: {{ ig_health.stale.hours }}時間 取得できていません
+            （しきい値 {{ ig_health.stale.limit_h }}時間）
+        </div>
+        {% endif %}
+        {% if ig_health.login %}
+        <div class="health health-error">
+            🛑 IG: ログインに失敗しています
+            <span class="health-account">{{ ig_health.login.message }}</span>
+        </div>
+        {% endif %}
+        {% if ig_health.egress %}
+        <div class="health {% if ig_health.egress.status == 'egress_warn' %}health-warn{% else %}health-error{% endif %}">
+            ⚠️ IG: 出口の異常
+            <span class="health-account">{{ ig_health.egress.message }}</span>
+        </div>
+        {% endif %}
+        {% endif %}
         {% if egress_alert %}
         <div class="health {% if egress_alert.status == 'error' %}health-error{% else %}health-warn{% endif %}">
             {% if egress_alert.status == 'error' %}🛑 取得停止（回線分離）{% else %}⚠️ 回線の出口IPが変わりました{% endif %}:
@@ -30,7 +61,9 @@
             ・ <a href="/status" class="health-link">詳細 →</a>
         </div>
         {% endif %}
-        {% if health %}
+        {# 止まっているときは「正常稼働中」を出さない。
+           止まっているのに緑が出るのが、気づけなかった原因そのもの。 #}
+        {% if health and not stale %}
         {% set has_error = error_accounts|length > 0 %}
         <div class="health {% if has_error %}health-warn{% else %}health-ok{% endif %}">
             {% if has_error %}
@@ -56,13 +89,14 @@
     <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
 </header>
 
+{% set src_base = '/?category=' ~ current_category %}
 {% set active_page = 'home' %}
 {% include '_nav.html' %}
 
 <nav class="tabs">
-    <a href="/?category=all" class="tab {% if current_category == 'all' %}active{% endif %}">すべて</a>
+    <a href="/?category=all&source={{ current_source }}" class="tab {% if current_category == 'all' %}active{% endif %}">すべて</a>
     {% for cat in categories %}
-    <a href="/?category={{ cat }}" class="tab {% if current_category == cat %}active{% endif %}">
+    <a href="/?category={{ cat }}&source={{ current_source }}" class="tab {% if current_category == cat %}active{% endif %}">
         {{ cat }}<span class="badge">{{ counts[cat] }}</span>
     </a>
     {% endfor %}

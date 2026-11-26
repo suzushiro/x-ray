@@ -1,8 +1,31 @@
 <nav class="xnav" style="top: {{ nav_top | default(0) }}px;">
     <a href="/" class="{% if active_page == 'home' %}active{% endif %}">🏠 ホーム</a>
+    {# 出自の切り替え。IGの取得が止まっていると、時系列で混ぜるだけでは
+       新しいXの投稿に押し流されてIGが何百ページも奥に行ってしまう。
+       TLとギャラリーにだけ出す（他の画面は出自の概念が無い）。
+       option の value を遷移先URLそのものにして、JS側の組み立てを無くす。 #}
+    {% if ig_configured and active_page in ('home', 'gallery') %}
+    <span class="nav-src">
+        <select class="src-select" onchange="goSource(this)"
+                aria-label="表示する出自">
+            {% for key, label in [('all', 'すべて'), ('x', 'X'), ('ig', 'Instagram')] %}
+            <option value="{{ src_base }}&source={{ key }}"
+                    {% if current_source == key %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        {% if not ig_available %}
+        {# 理由まで出す。「読めていない」だけだと画面から原因が分からない。 #}
+        <span class="src-warn"
+              title="IGアーカイブを読めていません: {{ ig_error or '原因不明' }}">⚠</span>
+        {% endif %}
+    </span>
+    {% endif %}
     <a href="/gallery" class="{% if active_page == 'gallery' %}active{% endif %}">🖼 ギャラリー</a>
     <a href="/bookmarks" class="{% if active_page == 'bookmarks' %}active{% endif %}">★ ブックマーク</a>
     <a href="/search" class="{% if active_page == 'search' %}active{% endif %}">🔍 検索</a>
+    {% if ig_configured %}
+    <a href="/ig-mutes" class="{% if active_page == 'ig-mutes' %}active{% endif %}">🔇 IGミュート</a>
+    {% endif %}
     <a href="/storage" class="{% if active_page == 'storage' %}active{% endif %}">📊 ストレージ</a>
     <a href="/status" class="{% if active_page == 'status' %}active{% endif %}">⚙ 状態</a>
 </nav>

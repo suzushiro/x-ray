@@ -1,0 +1,49 @@
+# X-Ray / IG取得ワーカー
+#
+# **X側のワーカーとはイメージを分ける。**
+# instaloader は Python 3.12 固定で検証されていて、twscrape とは依存の系統が違う。
+# 同じイメージに詰めると、片方の更新でもう片方が壊れる。
+# リポジトリと compose は1つに畳むが、実行環境は分けておく。
+#
+# 中身は ig/app/ をそのまま入れるだけ。IG-Ray から無改変で持ち込んだコードで、
+# 実データでしか出ない不具合を潰した結果なので、書き直さない。
+FROM python:3.12-slim
+
+# tini: docker stop / Ctrl-C を子プロセスへ正しく伝える（長時間の取得を中断できるように）
+# sqlite3: コンテナ内から DB を覗くデバッグ用
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tini \
+        sqlite3 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# requirements だけ先に入れてレイヤキャッシュを効かせる
+COPY ig/app/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY ig/app/ /app/
+
+# root で走らせない。/data はホスト側マウントなので、UID/GID は
+# compose の user: で母艦のユーザーに合わせる（既定は 1000:1000）。
+RUN useradd --create-home --uid 1000 --shell /bin/bash igray \
+    && mkdir -p /data \
+    && chown -R igray:igray /data /app
+USER igray
+
+# DBのファイル名は config.db_path() が決める。
+# **新名が無く旧 insta_ray.db があればそちらを使い続ける。**
+# 長く運用している環境は旧名のままなので、ここで決め打ちしない。
+ENV IG_RAY_SESSIONS=/data/sessions \
+    IG_RAY_CACHE=/data/cache
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# 既定は「何もしない」。IGは叩きすぎると即ブロックなので、
+# うっかり常駐して叩き続けないよう取得は明示的に起動する。
+CMD ["python", "-c", "import db, config; db.init_db(); print('ig worker ready. DB:', config.db_path())"]

@@ -54,6 +54,20 @@
         </div>
     </div>
 
+    {% if ig %}
+    <div class="storage-card">
+        <h3 style="font-size:14px;margin-bottom:10px">📷 IGアーカイブ <span class="st-badge">{{ ig.path }}</span></h3>
+        <div class="storage-row"><span class="label">投稿</span><span class="value">{{ ig.posts }}</span></div>
+        <div class="storage-row"><span class="label">アカウント</span><span class="value">{{ ig.accounts }}</span></div>
+        <div class="storage-row"><span class="label">画像（{{ ig.count }}枚）</span><span class="value">{{ ig.size }}</span></div>
+        <div class="st-note">
+            IG-Ray が管理している領域。X-Ray からは読むだけで、
+            ここの削除や保持期間は IG-Ray 側で操作する。
+            上の合計使用量には含めていない。
+        </div>
+    </div>
+    {% endif %}
+
     <div class="storage-card">
         <h3 style="font-size:14px;margin-bottom:10px">💾 合計使用量</h3>
         <div class="storage-row"><span class="label">データベース</span><span class="value">{{ db_size }}</span></div>

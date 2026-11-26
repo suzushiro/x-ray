@@ -12,17 +12,18 @@
     <div class="meta">{{ items|length }}枚表示中</div></div>
     <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
 </header>
+{% set src_base = '/gallery?category=' ~ current_category ~ ('&r18=1' if show_r18 else '') %}
 {% set active_page = 'gallery' %}
 {% include '_nav.html' %}
 
 <nav class="tabs">
-    <a href="/gallery?category=all{% if show_r18 %}&r18=1{% endif %}" class="tab {% if current_category=='all' %}active{% endif %}">すべて</a>
+    <a href="/gallery?category=all&source={{ current_source }}{% if show_r18 %}&r18=1{% endif %}" class="tab {% if current_category=='all' %}active{% endif %}">すべて</a>
     {% for cat in categories %}
     {% if cat != 'R18' or show_r18 %}
-    <a href="/gallery?category={{ cat }}{% if show_r18 %}&r18=1{% endif %}" class="tab {% if current_category==cat %}active{% endif %}">{{ cat }}</a>
+    <a href="/gallery?category={{ cat }}&source={{ current_source }}{% if show_r18 %}&r18=1{% endif %}" class="tab {% if current_category==cat %}active{% endif %}">{{ cat }}</a>
     {% endif %}
     {% endfor %}
-    <a href="/gallery?category={{ current_category }}{% if not show_r18 %}&r18=1{% endif %}" class="r18-toggle {% if show_r18 %}on{% endif %}" style="margin-left:8px">
+    <a href="/gallery?category={{ current_category }}&source={{ current_source }}{% if not show_r18 %}&r18=1{% endif %}" class="r18-toggle {% if show_r18 %}on{% endif %}" style="margin-left:8px">
         {% if show_r18 %}🔞 R18 ON{% else %}🔞 R18 OFF{% endif %}
     </a>
 </nav>

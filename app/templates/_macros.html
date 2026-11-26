@@ -47,8 +47,14 @@
         {% if is_rt %}
         <span class="tweet-name">@{{ rt_user }}</span>
         {% else %}
+        {% if t.source == 'ig' %}
+        <a href="/user/ig:{{ t.screen_name }}" style="text-decoration:none;color:inherit"><span class="tweet-name">{{ t.display_name or t.screen_name }}</span></a>
+        <span class="tweet-handle">@{{ t.screen_name }}</span>
+        <span class="src-badge src-ig" title="IG-Rayのアーカイブ">IG</span>
+        {% else %}
         <a href="/user/{{ t.screen_name }}" style="text-decoration:none;color:inherit"><span class="tweet-name">{{ t.display_name }}</span></a>
         <span class="tweet-handle">@{{ t.screen_name }}</span>
+        {% endif %}
         {% endif %}
         <span class="tweet-time">{{ t.created_at_jst }}</span>
     </div>
@@ -74,7 +80,9 @@
     {% if t.display_imgs %}
     <div class="tweet-media {% if t.display_imgs|length == 1 %}single{% else %}multi{% endif %}"
          data-imgs="{{ t.media_b64 }}" data-handle="{{ t.screen_name }}" data-dt="{{ t.created_at_dt }}"
-         data-tid="{{ t.tweet_id }}" data-mindexes="{{ t.media_idx | join(',') }}">
+         {# IGは読むだけなので削除の手がかりを渡さない。
+            data-tid が空だとライトボックスの削除ボタンが出ない。 #}
+         data-tid="{{ '' if t.source == 'ig' else t.tweet_id }}" data-mindexes="{{ t.media_idx | join(',') }}">
         {% for m in t.display_imgs %}
         <img src="{{ m }}" loading="lazy" data-idx="{{ loop.index0 }}" onclick="imgClick(this)">
         {% endfor %}
@@ -101,6 +109,8 @@
         <span class="stat">🔁 {{ t.retweet_count }}</span>
         <span class="stat">💬 {{ t.reply_count }}</span>
         <div class="footer-right">
+            {# IGもブックマークできる。画像はX-Ray側にコピーするので
+               ig-ray のキャッシュが消えても残る。 #}
             {% if show_bookmark %}
             <button class="bm-btn {% if t.is_bookmarked %}marked{% endif %}"
                     data-tid="{{ t.tweet_id }}" onclick="toggleBookmark(this)"
@@ -110,14 +120,24 @@
             <button class="dl-btn" data-imgs="{{ t.media_b64 }}" data-handle="{{ t.screen_name }}"
                     data-dt="{{ t.created_at_dt }}" onclick="dlAllBtn(this)">↓ {{ t.display_imgs|length }}枚</button>
             {% endif %}
+            {# IGも投稿できる。IG側のDBには書かず、読んだ画像を送るだけ。 #}
             {% if t.has_local_media and tumblr_enabled %}
             <button class="tumblr-btn" title="Tumblrに投稿"
                     data-tid="{{ t.tweet_id }}" data-handle="{{ t.screen_name }}"
+                    {# キャプションの既定はハンドル名だが、覚えておくキーは
+                       出自を含める（XとIGで同名のアカウントがありうる）。 #}
+                    data-pkey="{{ 'ig:' ~ t.screen_name if t.source == 'ig' else t.screen_name }}"
                     data-url="{{ t.url }}"
                     data-cats="{{ t.categories_b64 }}"
                     onclick="openTumblrShare(this)">t</button>
             {% endif %}
+            {% if t.source == 'ig' %}
+            <button class="bm-btn" title="このアカウントをミュート"
+                    onclick="igMute(this, '{{ t.screen_name }}')">🔇</button>
+            <a href="{{ t.url }}" target="_blank" class="tweet-link">Instagramで見る →</a>
+            {% else %}
             <a href="{{ t.url }}" target="_blank" class="tweet-link">Xで見る →</a>
+            {% endif %}
         </div>
     </div>
 </div>
