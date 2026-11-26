@@ -63,7 +63,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "42"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "44"
 
 PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
 # 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
@@ -185,29 +185,33 @@ def get_categories():
     return categories
 
 
-_counts_cache = {"at": 0.0, "counts": None, "total": 0}
+# 出自（all / x / ig）ごとに件数をキャッシュする
+_counts_cache = {}
 COUNTS_TTL = 60  # 秒
 
 
-def get_category_counts(conn, categories_list):
+def get_category_counts(conn, categories_list, source="all"):
     """
     カテゴリ別ツイート件数。
     以前はカテゴリ数ぶんCOUNT+LIKEをループしていた（categoriesはJSON文字列なので
     インデックスが効かず毎回フルスキャン×N回）。1クエリに畳んだうえで60秒キャッシュする。
     """
     now = time.time()
-    if _counts_cache["counts"] is not None and now - _counts_cache["at"] < COUNTS_TTL:
-        return _counts_cache["counts"], _counts_cache["total"]
+    # キャッシュは出自ごとに分ける。混ぜると X だけ選んだときに
+    # 混合の件数が出てしまう。
+    cached = _counts_cache.get(source)
+    if cached and now - cached["at"] < COUNTS_TTL:
+        return cached["counts"], cached["total"]
 
     counts = {c: 0 for c in categories_list}
     total = 0
     # accounts.categories の組み合わせは高々アカウント数ぶんしか無いのでGROUP BYで畳める
-    for r in conn.execute("""
+    for r in ([] if source == "ig" else conn.execute("""
         SELECT a.categories AS cats, COUNT(*) AS cnt
         FROM tweets t
         JOIN accounts a ON t.screen_name = a.screen_name
         GROUP BY a.categories
-    """):
+    """)):
         total += r["cnt"]
         try:
             for c in json.loads(r["cats"] or "[]"):
@@ -218,7 +222,7 @@ def get_category_counts(conn, categories_list):
 
     # IGアーカイブぶんも足す。表示には出ているのに件数に入っていないと
     # 「photographer 0件」なのに写真が並ぶ、という食い違いになる。
-    if ig_on():
+    if ig_on() and source != "x":
         try:
             hide_sql, params = ig_bridge.hidden_owner_sql(conn)
             where = f"WHERE {hide_sql} " if hide_sql else ""
@@ -239,7 +243,7 @@ def get_category_counts(conn, categories_list):
         except Exception as e:
             print(f"[!] IGの件数集計に失敗: {type(e).__name__}: {e}")
 
-    _counts_cache.update({"at": now, "counts": counts, "total": total})
+    _counts_cache[source] = {"at": now, "counts": counts, "total": total}
     return counts, total
 
 
@@ -404,17 +408,44 @@ def _x_timeline_sql(category, show_r18=False, require_media=False):
     return sql, params
 
 
+# タイムラインに出す出自。IGの取得は止まっているので混ぜるだけだと
+# 新しいXの投稿に押し流されて何百ページも奥に行ってしまう。切り替えを用意する。
+SOURCES = ("all", "x", "ig")
+
+
+def source_arg():
+    v = (request.args.get("source") or "all").strip().lower()
+    return v if v in SOURCES else "all"
+
+
 def timeline_rows(conn, category, limit, offset, show_r18=False,
-                  require_media=False):
+                  require_media=False, source="all"):
     """
     X と IG を時系列に混ぜた1ページぶんの行を返す。
+
+    source="x" / "ig" で片方だけに絞れる。
 
     IGが読めないときはX側だけ。ig-ray 側の事情でこちらが落ちないよう、
     混合クエリが失敗したらX単独にフォールバックする。
     """
     x_sql, x_params = _x_timeline_sql(category, show_r18, require_media)
 
-    if ig_on():
+    if source == "ig":
+        if not ig_on():
+            return []
+        ig_sql, ig_params = ig_bridge.select_sql(
+            conn, category=category, show_r18=show_r18,
+            require_media=require_media)
+        sql = (f"SELECT * FROM ( SELECT {TL_COLUMNS} FROM ( {ig_sql} ) ) "
+               f"ORDER BY {TL_ORDER} DESC LIMIT ? OFFSET ?")
+        try:
+            return [dict(r) for r in conn.execute(
+                sql, (*ig_params, limit, offset)).fetchall()]
+        except Exception as e:
+            print(f"[!] IGのタイムラインに失敗: {type(e).__name__}: {e}")
+            return []
+
+    if source == "all" and ig_on():
         ig_sql, ig_params = ig_bridge.select_sql(
             conn, category=category, show_r18=show_r18,
             require_media=require_media)
@@ -445,6 +476,7 @@ def timeline_rows(conn, category, limit, offset, show_r18=False,
 @app.route("/")
 def index():
     category = request.args.get("category", "all")
+    source = source_arg()
     page = page_arg()
     offset = (page - 1) * PER_PAGE
 
@@ -452,7 +484,7 @@ def index():
     bookmarked_ids = get_bookmarked_ids(conn)
     deleted_media = cache_utils.deleted_urls(conn)
 
-    rows = timeline_rows(conn, category, PER_PAGE + 1, offset)
+    rows = timeline_rows(conn, category, PER_PAGE + 1, offset, source=source)
 
     # PER_PAGE+1件取得して、次ページがあるか判定
     has_next = len(rows) > PER_PAGE
@@ -463,7 +495,7 @@ def index():
 
     # 各カテゴリの件数（タブのバッジ用）
     categories_list = get_categories()
-    counts, total_count = get_category_counts(conn, categories_list)
+    counts, total_count = get_category_counts(conn, categories_list, source)
 
     last_run = conn.execute("""
         SELECT run_at FROM scrape_log ORDER BY run_at DESC LIMIT 1
@@ -526,7 +558,8 @@ def index():
                     reply_ids.add(t["tweet_id"])
     tweet_items = [t for t in tweets if t["tweet_id"] not in reply_ids]
 
-    next_url = url_for("index", category=category, page=page + 1) if has_next else None
+    next_url = url_for("index", category=category, page=page + 1,
+                       source=source) if has_next else None
     if request.args.get("partial") == "1":
         return render_template("_feed.html", tweets=tweet_items, next_url=next_url)
 
@@ -536,6 +569,8 @@ def index():
         next_url=next_url,
         categories=categories_list,
         current_category=category,
+        current_source=source,
+        ig_available=ig_on(),
         counts=counts,
         total_count=total_count,
         last_run_jst=last_run_jst,
@@ -1195,6 +1230,7 @@ def bookmarks():
 @app.route("/gallery")
 def gallery():
     category = request.args.get("category", "all")
+    source = source_arg()
     show_r18 = request.args.get("r18", "0") == "1"
     page = page_arg()
     offset = (page - 1) * PER_PAGE
@@ -1202,7 +1238,7 @@ def gallery():
     conn = db_ro()
 
     rows = timeline_rows(conn, category, PER_PAGE + 1, offset,
-                         show_r18=show_r18, require_media=True)
+                         show_r18=show_r18, require_media=True, source=source)
 
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
@@ -1232,7 +1268,7 @@ def gallery():
             })
 
     next_url = (
-        url_for("gallery", category=category, page=page + 1,
+        url_for("gallery", category=category, page=page + 1, source=source,
                 **({"r18": 1} if show_r18 else {})) if has_next else None
     )
     if request.args.get("partial") == "1":
@@ -1244,6 +1280,8 @@ def gallery():
         items=gallery_items,
         categories=get_categories(),
         current_category=category,
+        current_source=source,
+        ig_available=ig_on(),
         show_r18=show_r18,
         page=page,
         has_next=has_next,

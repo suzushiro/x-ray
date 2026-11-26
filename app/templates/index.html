@@ -56,13 +56,14 @@
     <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
 </header>
 
+{% set src_base = '/?category=' ~ current_category %}
 {% set active_page = 'home' %}
 {% include '_nav.html' %}
 
 <nav class="tabs">
-    <a href="/?category=all" class="tab {% if current_category == 'all' %}active{% endif %}">すべて</a>
+    <a href="/?category=all&source={{ current_source }}" class="tab {% if current_category == 'all' %}active{% endif %}">すべて</a>
     {% for cat in categories %}
-    <a href="/?category={{ cat }}" class="tab {% if current_category == cat %}active{% endif %}">
+    <a href="/?category={{ cat }}&source={{ current_source }}" class="tab {% if current_category == cat %}active{% endif %}">
         {{ cat }}<span class="badge">{{ counts[cat] }}</span>
     </a>
     {% endfor %}

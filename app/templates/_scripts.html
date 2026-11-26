@@ -513,6 +513,13 @@ async function tmbResetPreset(ev) {
     }
 }
 
+// ナビの出自プルダウン。option の value が遷移先URLそのもの。
+// JSでURLを組み立てないのは、組み立てを2箇所（テンプレとJS）に
+// 分けると片方だけ直して壊す事故が起きるため。
+function goSource(sel) {
+    if (sel && sel.value) location.href = sel.value;
+}
+
 // 投稿先の一覧を一度だけ読み込む
 let tmbAccounts = null;
 async function tmbLoadAccounts() {

@@ -87,6 +87,16 @@ header h1 { font-size: 18px; margin: 0 0 2px 0; }
 }
 .theme-btn:hover { background: var(--surface-hover); color: var(--text); }
 
+/* 出自の切り替え。ナビの中に置くので、高さと文字サイズをリンクに揃える */
+.nav-src { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.src-select {
+    font-size: 13px; padding: 6px 10px; border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface); color: var(--text);
+    font-family: inherit; cursor: pointer;
+}
+.src-select:hover { background: var(--surface-hover); }
+.src-warn { font-size: 12px; color: #f4212e; }
 .tabs {
     display: flex; gap: 6px; overflow-x: auto;
     padding: 10px 16px;

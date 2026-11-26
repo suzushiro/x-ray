@@ -218,6 +218,52 @@ _badge = re.search(r"illustrator<span class=\"badge\">(\d+)</span>", html)
 check("カテゴリ件数にIGぶんが入る", bool(_badge) and _badge.group(1) == "5",
       _badge.group(0) if _badge else "バッジが見つからない")
 
+print("\n== [2b] 出自の切り替え ==")
+# IGの取得は止まっているので、混ぜるだけだと新しいXの投稿に押し流されて
+# 何百ページも奥に行く。IGだけを見る導線が無いと実質見えない。
+def _seq(src):
+    h2 = c.get(f"/?source={src}").get_data(as_text=True)
+    return [a or b for a, b in
+            re.findall(r"caption of (IG\w+)|tweet (x\d)", h2)], h2
+
+_all, _ = _seq("all")
+_x, _hx = _seq("x")
+_ig, _hig = _seq("ig")
+check("すべて では両方出る",
+      any(v.startswith("IG") for v in _all) and "x1" in _all, str(_all))
+check("X だけに絞れる", _x == ["x2", "x1"], str(_x))
+check("IG だけに絞れる",
+      _ig and all(v.startswith("IG") for v in _ig), str(_ig))
+# 文字列 "src-select" は _style.html のCSSにも出るので、
+# クラス名だけを探すとCSSに当たって必ず通ってしまう。要素ごと数える。
+_SEL = '<select class="src-select"'
+check("ナビに切り替えのプルダウンが出る", _hig.count(_SEL) == 1,
+      str(_hig.count(_SEL)))
+check("選択中が selected になる",
+      'source=ig"\n                    selected' in _hig
+      or 'source=ig" selected' in _hig.replace("\n", " ").replace("  ", " "),
+      "selected位置")
+check("遷移先URLがoptionに入っている", 'value="/?category=all&source=x"' in _hig)
+# 出自の概念が無い画面には出さない
+for _p in ("/bookmarks", "/search", "/storage", "/status"):
+    check(f"{_p} にはプルダウンを出さない",
+          c.get(_p).get_data(as_text=True).count(_SEL) == 0)
+
+# 件数バッジも追従しないと、Xだけ表示しているのにIG込みの数が出てしまう
+_b = dict(re.findall(r'(\w+)<span class="badge">(\d+)</span>', _hx))
+check("Xだけのとき件数もXだけ", _b.get("illustrator") == "2", str(_b))
+_b2 = dict(re.findall(r'(\w+)<span class="badge">(\d+)</span>', _hig))
+check("IGだけのとき件数もIGだけ", _b2.get("illustrator") == "3", str(_b2))
+
+_gal_ig = c.get("/gallery?source=ig").get_data(as_text=True)
+check("ギャラリーでも絞れる",
+      "/ig-cache/" in _gal_ig and "/cache/x" not in _gal_ig)
+check("ページ送りに出自が残る",
+      "source=ig" in _gal_ig or "ページ送り不要", str("source=ig" in _gal_ig))
+
+check("知らない値は all 扱い",
+      _seq("bogus")[0] == _all, str(_seq("bogus")[0]))
+
 print("\n== [3] 監視対象とミュートの除外 ==")
 check("監視対象外（共同投稿の相手）は出ない", "caption of IGCOAU" not in html, )
 check("ミュートは出ない", "caption of IGMUTE" not in html)
