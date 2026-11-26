@@ -20,7 +20,9 @@
         </div>
         <div>
             <div class="profile-name">{{ account.display_name }}</div>
-            <div class="profile-handle">@{{ account.screen_name }}</div>
+            {# IG は screen_name に ig: 接頭辞が付く（URL用）。
+               画面にはハンドル名だけを出し、出自はバッジで示す。 #}
+            <div class="profile-handle">@{{ account.handle or account.screen_name }}{% if account.source == 'ig' %} <span class="src-badge src-ig">IG</span>{% endif %}</div>
             <div class="tweet-cats" style="margin-top:6px">
                 {% for c in account.categories_list %}<span class="cat-pill">{{ c }}</span>{% endfor %}
             </div>
@@ -31,7 +33,7 @@
         <span><b>{{ stats.with_media or 0 }}</b> 画像投稿</span>
         {% if stats.with_video %}<span><b>{{ stats.with_video }}</b> 動画</span>{% endif %}
         <span><b>{{ stats.total_likes or 0 }}</b> ♡合計</span>
-        <span><b>{{ stats.total_rts or 0 }}</b> 🔁合計</span>
+        {% if account.source != 'ig' %}<span><b>{{ stats.total_rts or 0 }}</b> 🔁合計</span>{% endif %}
         {% if stats.per_day %}<span><b>{{ stats.per_day }}</b> 投稿/日</span>{% endif %}
     </div>
     {% if stats.oldest_jst %}

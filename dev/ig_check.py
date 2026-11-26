@@ -144,6 +144,14 @@ for tid, when in (("x1", "2026-11-19T11:00:00+09:00"),      # = 02:00 UTC
                  (tid, "x_artist", f"tweet {tid}", when,
                   f"https://x.com/x_artist/status/{tid}",
                   json.dumps([f"https://p/{tid}.jpg"]), json.dumps([None])))
+    # 全文検索の索引はスクレイパーだけが書く（トリガではない）。
+    # 直接INSERTしただけだと検索に出ないので、本番と同じ状態にしておく。
+    try:
+        conn.execute("INSERT INTO tweets_fts (tweet_id, content, screen_name,"
+                     " display_name) VALUES (?,?,?,?)",
+                     (tid, f"tweet {tid}", "x_artist", "X Artist"))
+    except Exception:
+        pass
 conn.commit()
 conn.close()
 
@@ -303,6 +311,50 @@ for path, data in (("/api/bookmark/toggle", {"tweet_id": "ig:IGAAA"}),
     res = c.post(path, data=data)
     check(f"{path} はIGのIDを拒否する", res.status_code == 400,
           f"status={res.status_code}")
+
+print("\n== [5a] ユーザーページ・検索・ストレージ ==")
+_u = c.get("/user/ig:ig_artist")
+check("IGのユーザーページが開く", _u.status_code == 200, str(_u.status_code))
+_uh = _u.get_data(as_text=True)
+check("その人の投稿だけが出る",
+      "caption of IGAAA" in _uh and "caption of IGCOAU" not in _uh)
+check("ローカル画像が使われる", "/ig-cache/" in _uh)
+check("存在しない投稿主は404",
+      c.get("/user/ig:nobody").status_code == 404)
+check("カードからユーザーページへ行ける",
+      'href="/user/ig:ig_artist"' in html)
+# URL用の ig: 接頭辞が画面に漏れない
+check("ハンドルに ig: が漏れない", "@ig:ig_artist" not in _uh)
+check("出自バッジで区別できる", 'src-badge src-ig' in _uh)
+check("IGにRT統計を出さない", "🔁合計" not in _uh)
+
+_s = c.get("/search?q=IGAAA").get_data(as_text=True)
+check("検索にIGが出る", "caption of IGAAA" in _s)
+_sx = c.get("/search?q=tweet").get_data(as_text=True)
+check("検索のXは壊れていない", "tweet x1" in _sx)
+# 監視対象外は検索でも出さない（TLと同じ規則）
+_sc = c.get("/search?q=IGCOAU").get_data(as_text=True)
+check("検索でも監視対象外は出さない", "caption of IGCOAU" not in _sc)
+
+_st = c.get("/storage").get_data(as_text=True)
+check("ストレージにIGの内訳が出る", "IGアーカイブ" in _st)
+check("IGの件数が出る", ">3<" in _st or "投稿" in _st)
+
+# ig-ray 側に列が足りなくてもページごと落とさない
+_nocol = os.path.join(BASE, "nocol.db")
+shutil.copy(IG_DB, _nocol)
+_c3 = sqlite3.connect(_nocol)
+_c3.execute("ALTER TABLE posts DROP COLUMN is_video")
+_c3.commit(); _c3.close()
+_e3 = dict(os.environ); _e3["IG_DB_PATH"] = _nocol
+_o3 = subprocess.run([sys.executable, "-c", f"""
+import sys
+sys.path.insert(0, {str(APP)!r})
+import web
+r = web.app.test_client().get("/user/ig:ig_artist")
+print("STATUS", r.status_code)
+"""], capture_output=True, env=_e3, text=True, timeout=120).stdout
+check("列が欠けてもユーザーページは開く", "STATUS 200" in _o3, _o3.strip()[:200])
 
 print("\n== [5b] IGの投稿をTumblrへ ==")
 # ig-ray の web を止められるかはここにかかっている。

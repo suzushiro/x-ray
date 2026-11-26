@@ -48,7 +48,7 @@
         <span class="tweet-name">@{{ rt_user }}</span>
         {% else %}
         {% if t.source == 'ig' %}
-        <span class="tweet-name">{{ t.display_name or t.screen_name }}</span>
+        <a href="/user/ig:{{ t.screen_name }}" style="text-decoration:none;color:inherit"><span class="tweet-name">{{ t.display_name or t.screen_name }}</span></a>
         <span class="tweet-handle">@{{ t.screen_name }}</span>
         <span class="src-badge src-ig" title="IG-Rayのアーカイブ">IG</span>
         {% else %}
