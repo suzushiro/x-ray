@@ -150,6 +150,21 @@ def attach(conn):
         return False
 
 
+def is_attached(conn):
+    """
+    この接続に ig のDBが繋がっているか。
+
+    `attach()` の戻り値を flask の g に持たせる方式だと、テストやCLIから
+    素の接続を渡したときに答えが出せない。接続自体に聞く。
+    sqlite3.Connection には属性を付けられない（__dict__ が無い）ので、
+    接続に印を付ける方式も取れず、PRAGMA で見るのが素直。
+    """
+    try:
+        return any(r[1] == SCHEMA for r in conn.execute("PRAGMA database_list"))
+    except Exception:
+        return False
+
+
 def _columns(conn, table):
     try:
         return {r[1] for r in conn.execute(
@@ -193,57 +208,20 @@ def hidden_owner_sql(conn, column="p.owner_username"):
 
 def select_sql(conn, category="all", show_r18=False, require_media=False):
     """
-    IG の投稿を **X-Ray の tweets JOIN accounts と同じ列並び**で返す SELECT。
+    IG の投稿を **共通の列並び**で返す SELECT。
 
-    タイムラインで X の投稿と UNION ALL するためのもので、列の順序と名前は
-    呼び出し側（web.py の X 側 SELECT）と1対1で対応させること。
+    列の射影と絞り込みは `sources.IgSource` が持つ。以前はこの関数が
+    17列の射影を直書きしていて、同じ射影が /search と IGユーザーページにも
+    複製されていた（計3箇所）。列を1つ足すと3箇所直す必要があり、
+    実際に `quoted_json` を落として引用RTが壊れたことがある。
 
-    メディアはここでは組み立てない。`media_json` は ig-ray の dict 配列の
-    ままで、ローカル画像は media_index にあるので、ページ分の行が確定して
-    から `attach_media()` でまとめて解決する（1行ずつ引くと N+1 になる）。
+    互換のために残してある薄い入口。新しい呼び出しは
+    `sources.by_name("ig").timeline_sql(...)` を使うこと。
     """
-    hide_sql, hide_params = hidden_owner_sql(conn)
-    clauses = [hide_sql] if hide_sql else []
-    params = list(hide_params)
-
-    # カテゴリの絞り込みは X-Ray 側と同じ規則にする。
-    # ig-ray の categories_json も同じ「JSON配列の文字列」なので LIKE が効く。
-    if category == "all":
-        if not show_r18:
-            clauses.append("COALESCE(a.categories_json,'') NOT LIKE '%\"R18\"%'")
-    else:
-        clauses.append("a.categories_json LIKE ?")
-        params.append(f'%"{category}"%')
-
-    if require_media:
-        clauses.append("p.media_json IS NOT NULL AND p.media_json != '[]'")
-
-    where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
-    sql = f"""
-        SELECT
-            'ig'                                  AS source,
-            '{ID_PREFIX}' || p.shortcode          AS tweet_id,
-            p.owner_username                      AS screen_name,
-            a.full_name                           AS display_name,
-            p.caption                             AS content,
-            p.date_utc                            AS created_at,
-            '{POST_URL_PREFIX}' || p.shortcode || '/' AS url,
-            p.likes                               AS like_count,
-            0                                     AS retweet_count,
-            p.comments                            AS reply_count,
-            p.media_json                          AS media_json,
-            NULL                                  AS video_json,
-            NULL                                  AS local_media_json,
-            a.categories_json                     AS categories,
-            a.profile_pic_local                   AS profile_image_url,
-            NULL                                  AS reply_to_tweet_id,
-            -- IGに引用RTの概念は無い。列数と並びをX側に合わせるためのNULL。
-            NULL                                  AS quoted_json
-        FROM {SCHEMA}.posts p
-        LEFT JOIN {SCHEMA}.accounts a ON p.owner_username = a.username
-        {where}
-    """
-    return sql, params
+    import sources
+    return sources.by_name("ig").timeline_sql(
+        conn, category=category, show_r18=show_r18,
+        require_media=require_media)
 
 
 def cache_rel(local_path):

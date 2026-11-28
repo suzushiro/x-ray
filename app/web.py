@@ -19,6 +19,10 @@ import seed_accounts
 import cache_utils
 import tumblr_client
 import ig_bridge
+import sources        # 出自（X / IG）の登録と共通列の約束
+
+# 出自ごとの違いは sources.py の中だけで閉じる。ここに X 用/IG 用の
+# 分岐を増やさないこと（増やしたくなったら sources.Source に口を足す）。
 
 # カテゴリ名 → Tumblrタグ の変換表。
 # X-Ray内部のカテゴリ名をそのままタグにすると都合が悪いものを置き換える。
@@ -60,7 +64,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "54"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "55"
 
 # 外部公開はしない。
 # Tumblr投稿をAPI方式に固定した時点（v35）で、一時公開URLを使う
@@ -98,16 +102,19 @@ def db_ro():
     """
     IGアーカイブを繋いだ**読み取り専用**コネクション。
 
-    `db()` と分けてあるのは、ig_bridge.attach() が `PRAGMA query_only` を
+    `db()` と分けてあるのは、外部DBの ATTACH が `PRAGMA query_only` を
     立てるため。書き込みのあるルートで使うと X-Ray 側の更新まで弾かれる。
     タイムラインやギャラリーのような読むだけの画面で使う。
 
-    IGが読めないときは素の（ATTACHしていない）コネクションを返す。
-    その場合 `g.ig_on` が False になるので、呼び出し側はX側だけで組み立てる。
+    繋ぐ相手は sources の登録ぶん全部。以前はここで
+    `ig_bridge.attach()` を名指ししていて、出自を足しても接続時に
+    繋がらず一覧に出なかった。
+    読めなかった出自は `sources.active()` が黙って外す。
     """
     if "conn_ro" not in g:
         conn = get_conn()
-        g.ig_on = ig_bridge.attach(conn)
+        attached = sources.attach_all(conn)
+        g.ig_on = "ig" in attached
         g.conn_ro = conn
     return g.conn_ro
 
@@ -242,57 +249,24 @@ COUNTS_TTL = 60  # 秒
 
 def get_category_counts(conn, categories_list, source="all"):
     """
-    カテゴリ別ツイート件数。
-    以前はカテゴリ数ぶんCOUNT+LIKEをループしていた（categoriesはJSON文字列なので
-    インデックスが効かず毎回フルスキャン×N回）。1クエリに畳んだうえで60秒キャッシュする。
+    カテゴリ別の件数。読める出自ぶんを足し合わせる。
+
+    集計そのものは各出自が持つ（sources.py）。以前はX用とIG用の
+    ほぼ同形のGROUP BYがこの関数の中に2本並んでいて、出自が増えると
+    3本目を足す形だった。
+
+    表示には出ているのに件数に入っていないと「photographer 0件」なのに
+    写真が並ぶ、という食い違いになるので、出自の取りこぼしは直接バグになる。
+
+    キャッシュは出自ごとに分ける。混ぜると X だけ選んだときに
+    混合の件数が出てしまう。
     """
     now = time.time()
-    # キャッシュは出自ごとに分ける。混ぜると X だけ選んだときに
-    # 混合の件数が出てしまう。
     cached = _counts_cache.get(source)
     if cached and now - cached["at"] < COUNTS_TTL:
         return cached["counts"], cached["total"]
 
-    counts = {c: 0 for c in categories_list}
-    total = 0
-    # accounts.categories の組み合わせは高々アカウント数ぶんしか無いのでGROUP BYで畳める
-    for r in ([] if source == "ig" else conn.execute("""
-        SELECT a.categories AS cats, COUNT(*) AS cnt
-        FROM tweets t
-        JOIN accounts a ON t.screen_name = a.screen_name
-        GROUP BY a.categories
-    """)):
-        total += r["cnt"]
-        try:
-            for c in json.loads(r["cats"] or "[]"):
-                if c in counts:
-                    counts[c] += r["cnt"]
-        except Exception:
-            pass
-
-    # IGアーカイブぶんも足す。表示には出ているのに件数に入っていないと
-    # 「photographer 0件」なのに写真が並ぶ、という食い違いになる。
-    if ig_on() and source != "x":
-        try:
-            hide_sql, params = ig_bridge.hidden_owner_sql(conn)
-            where = f"WHERE {hide_sql} " if hide_sql else ""
-            for r in conn.execute(f"""
-                SELECT a.categories_json AS cats, COUNT(*) AS cnt
-                FROM {ig_bridge.SCHEMA}.posts p
-                LEFT JOIN {ig_bridge.SCHEMA}.accounts a
-                       ON p.owner_username = a.username
-                {where}GROUP BY a.categories_json
-            """, params):
-                total += r["cnt"]
-                try:
-                    for c in json.loads(r["cats"] or "[]"):
-                        if c in counts:
-                            counts[c] += r["cnt"]
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"[!] IGの件数集計に失敗: {type(e).__name__}: {e}")
-
+    counts, total = sources.category_counts_all(conn, categories_list, source)
     _counts_cache[source] = {"at": now, "counts": counts, "total": total}
     return counts, total
 
@@ -419,52 +393,16 @@ def serve_cache(filename):
     return send_from_directory(CACHE_DIR, filename)
 
 
-# タイムラインで使う列。X と IG で**同じ並び**にする必要がある
-# （UNION ALL は列名ではなく位置で対応するため）。
-TL_COLUMNS = """
-    source, tweet_id, screen_name, display_name, content, created_at, url,
-    like_count, retweet_count, reply_count, media_json, video_json,
-    local_media_json, categories, profile_image_url, reply_to_tweet_id,
-    quoted_json
-"""
-
-# 並び替えのキー。created_at をそのまま文字列比較してはいけない。
-# X と IG で保存形式のオフセットが揃っておらず（+09:00 と +00:00 が混在しうる）、
-# 素の文字列ソートだと時系列が狂う。strftime はオフセットを畳んで UTC に
-# 正規化するので、これを通した値で並べる。
-TL_ORDER = "strftime('%Y-%m-%dT%H:%M:%S', created_at)"
-
-
-def _x_timeline_sql(category, show_r18=False, require_media=False):
-    """X側の1件分のSELECT。列は TL_COLUMNS と同じ並び。"""
-    # カテゴリを選んでいるときは R18 で追加の絞り込みをしない（既存の挙動）。
-    # 「all のときだけ R18 を伏せる」が元からの仕様で、タブで R18 を選べば出る。
-    where, params = [], []
-    if category == "all":
-        if not show_r18:
-            where.append("a.categories NOT LIKE '%\"R18\"%'")
-    else:
-        where.append("a.categories LIKE ?")
-        params.append(f'%"{category}"%')
-    if require_media:
-        where.append("t.media_json IS NOT NULL AND t.media_json != '[]'")
-    where = " AND ".join(where) or "1=1"
-    sql = f"""
-        SELECT 'x' AS source, t.tweet_id, t.screen_name, a.display_name,
-               t.content, t.created_at, t.url, t.like_count, t.retweet_count,
-               t.reply_count, t.media_json, t.video_json, t.local_media_json,
-               a.categories, a.profile_image_url, t.reply_to_tweet_id,
-               t.quoted_json
-        FROM tweets t
-        JOIN accounts a ON t.screen_name = a.screen_name
-        WHERE {where}
-    """
-    return sql, params
+# 列の約束と並び替えキーは sources.py が持つ（唯一の正）。
+# 以前はここに共通名の一覧とX射影が、ig_bridge にIG射影が、
+# さらに /search とIGユーザーページにもIG射影の複製があった。
+TL_COLUMNS = sources.TL_COLUMNS
+TL_ORDER = sources.TL_ORDER
 
 
 # タイムラインに出す出自。IGの取得は止まっているので混ぜるだけだと
 # 新しいXの投稿に押し流されて何百ページも奥に行ってしまう。切り替えを用意する。
-SOURCES = ("all", "x", "ig")
+SOURCES = sources.names()
 
 
 def source_arg():
@@ -475,56 +413,40 @@ def source_arg():
 def timeline_rows(conn, category, limit, offset, show_r18=False,
                   require_media=False, source="all"):
     """
-    X と IG を時系列に混ぜた1ページぶんの行を返す。
+    登録されている出自を時系列に混ぜた1ページぶんの行を返す。
 
-    source="x" / "ig" で片方だけに絞れる。
+    source に出自名を渡せばそれだけに絞れる。読めない出自は黙って外れる。
 
-    IGが読めないときはX側だけ。ig-ray 側の事情でこちらが落ちないよう、
-    混合クエリが失敗したらX単独にフォールバックする。
+    以前は「IGだけ」「混合」「Xだけ」の3分岐をここに書いていた。
+    出自が増えるたびに分岐が増える形だったのを、sources の登録を
+    並べるだけにした。混合が失敗したときに X 単独へ落とす保険は
+    そのまま残す（ig-ray 側の事情でこちらを落とさないため）。
     """
-    x_sql, x_params = _x_timeline_sql(category, show_r18, require_media)
+    active = sources.active(conn, source)
+    if not active:
+        return []
 
-    if source == "ig":
-        if not ig_on():
-            return []
-        ig_sql, ig_params = ig_bridge.select_sql(
-            conn, category=category, show_r18=show_r18,
-            require_media=require_media)
-        sql = (f"SELECT * FROM ( SELECT {TL_COLUMNS} FROM ( {ig_sql} ) ) "
-               f"ORDER BY {TL_ORDER} DESC LIMIT ? OFFSET ?")
+    sql, params = sources.union_timeline_sql(
+        conn, active, category, show_r18, require_media)
+    try:
+        return [dict(r) for r in conn.execute(
+            sql, (*params, limit, offset)).fetchall()]
+    except Exception as e:
+        print(f"[!] タイムラインに失敗（{','.join(s.name for s in active)}）: "
+              f"{type(e).__name__}: {e}")
+
+    # 複数を混ぜて失敗したときだけ、最初の出自だけで出し直す。
+    # 全部まとめて落とすと、片方の都合で画面が真っ白になる。
+    if len(active) > 1:
+        head = active[:1]
+        sql, params = sources.union_timeline_sql(
+            conn, head, category, show_r18, require_media)
         try:
             return [dict(r) for r in conn.execute(
-                sql, (*ig_params, limit, offset)).fetchall()]
+                sql, (*params, limit, offset)).fetchall()]
         except Exception as e:
-            print(f"[!] IGのタイムラインに失敗: {type(e).__name__}: {e}")
-            return []
-
-    if source == "all" and ig_on():
-        ig_sql, ig_params = ig_bridge.select_sql(
-            conn, category=category, show_r18=show_r18,
-            require_media=require_media)
-        # UNION の ORDER BY には式を書けない（SQLiteは結果列の名前か番号しか
-        # 受け付けない）。外側のSELECTで包んでから並べ替える。
-        merged = f"""
-            SELECT * FROM (
-                SELECT {TL_COLUMNS} FROM ( {x_sql} )
-                UNION ALL
-                SELECT {TL_COLUMNS} FROM ( {ig_sql} )
-            )
-            ORDER BY {TL_ORDER} DESC
-            LIMIT ? OFFSET ?
-        """
-        try:
-            return [dict(r) for r in conn.execute(
-                merged, (*x_params, *ig_params, limit, offset)).fetchall()]
-        except Exception as e:
-            print(f"[!] IGを混ぜたタイムラインに失敗（X単独で続行）: "
-                  f"{type(e).__name__}: {e}")
-
-    sql = (f"SELECT * FROM ( SELECT {TL_COLUMNS} FROM ( {x_sql} ) ) "
-           f"ORDER BY {TL_ORDER} DESC LIMIT ? OFFSET ?")
-    return [dict(r) for r in conn.execute(
-        sql, (*x_params, limit, offset)).fetchall()]
+            print(f"[!] {head[0].name} 単独でも失敗: {type(e).__name__}: {e}")
+    return []
 
 
 # 取得が「黙って止まる」のを原因に関係なく見張るしきい値（時間）。
@@ -625,7 +547,7 @@ def index():
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
 
-    rows = ig_bridge.attach_media(conn, rows) if ig_on() else rows
+    rows = sources.attach_media_all(conn, rows)
     tweets = [format_tweet(r, bookmarked_ids, deleted_media) for r in rows]
 
     # 各カテゴリの件数（タブのバッジ用）
@@ -1436,7 +1358,7 @@ def gallery():
 
     has_next = len(rows) > PER_PAGE
     rows = rows[:PER_PAGE]
-    rows = ig_bridge.attach_media(conn, rows) if ig_on() else rows
+    rows = sources.attach_media_all(conn, rows)
 
     # 画像を平坦化（1画像=1グリッドアイテム）
     deleted = cache_utils.deleted_urls(conn)
@@ -1512,38 +1434,26 @@ def search():
         results = [format_tweet(dict(r) | {"source": "x"},
                                 bookmarked_ids, deleted_media) for r in rows]
 
-        # IG も同じ検索語で引いて混ぜる。FTS は X 側にしか無いので LIKE。
-        # 件数が200に収まる画面なので、並べ替えは取得後にまとめて行う。
+        # IG も同じ検索語で引いて混ぜる。全文検索の索引は X 側にしか
+        # 無いので IG は本文のLIKE。どちらも共通列で返るので、
+        # 並べ替えは取得後にまとめて行える。
+        #
+        # 以前はここに IG の17列射影が直書きされていた（ig_bridge と
+        # ユーザーページにも同じものがあり計3箇所）。sources が持つ。
         ro = db_ro()
-        if ig_on():
+        for src in sources.active(ro, "all"):
+            if src.name == "x":
+                continue        # X は上で FTS 込みで引いている
             try:
-                hide_sql, hp = ig_bridge.hidden_owner_sql(ro)
-                where = f"AND {hide_sql} " if hide_sql else ""
-                ig_rows = [dict(r) for r in ro.execute(f"""
-                    SELECT 'ig' AS source, 'ig:' || p.shortcode AS tweet_id,
-                           p.owner_username AS screen_name,
-                           a.full_name AS display_name, p.caption AS content,
-                           p.date_utc AS created_at,
-                           '{ig_bridge.POST_URL_PREFIX}' || p.shortcode || '/' AS url,
-                           p.likes AS like_count, 0 AS retweet_count,
-                           p.comments AS reply_count, p.media_json AS media_json,
-                           NULL AS video_json, NULL AS local_media_json,
-                           a.categories_json AS categories,
-                           a.profile_pic_local AS profile_image_url,
-                           NULL AS reply_to_tweet_id, NULL AS quoted_json
-                    FROM {ig_bridge.SCHEMA}.posts p
-                    LEFT JOIN {ig_bridge.SCHEMA}.accounts a
-                           ON p.owner_username = a.username
-                    WHERE p.caption LIKE ? {where}
-                    ORDER BY {TL_ORDER} DESC LIMIT 200
-                """, [f"%{q}%", *hp]).fetchall()]
-                ig_rows = ig_bridge.attach_media(ro, ig_rows)
+                rows = src.search(ro, q, limit=200)
+                rows = src.attach_media(ro, rows)
                 results += [format_tweet(r, bookmarked_ids, deleted_media)
-                            for r in ig_rows]
+                            for r in rows]
                 results.sort(key=_utc_key, reverse=True)
                 results = results[:200]
             except Exception as e:
-                print(f"[!] IGの検索に失敗（X単独で続行）: {type(e).__name__}: {e}")
+                print(f"[!] {src.name} の検索に失敗（他の出自で続行）: "
+                      f"{type(e).__name__}: {e}")
 
     return render_template("search.html", results=results, query=q, categories=get_categories())
 
@@ -1569,33 +1479,11 @@ def _ig_user_profile(screen_name, date_from, date_to, page, offset):
            "categories_list": json.loads(acc["categories_json"] or "[]"),
            "source": "ig"}
 
-    where, params = ["p.owner_username = ?"], [owner]
-    if date_from:
-        where.append("p.date_utc >= ?")
-        params.append(date_from)
-    if date_to:
-        where.append("p.date_utc <= ?")
-        params.append(date_to + "T23:59:59")
-    where_sql = " AND ".join(where)
-
-    # select_sql は監視対象の絞り込み込みで WHERE を埋めて返すので、
-    # ここでは投稿主が確定しているぶん素直に組み立てる。
-    rows = [dict(r) for r in conn.execute(f"""
-        SELECT 'ig' AS source, 'ig:' || p.shortcode AS tweet_id,
-               p.owner_username AS screen_name, a.full_name AS display_name,
-               p.caption AS content, p.date_utc AS created_at,
-               '{ig_bridge.POST_URL_PREFIX}' || p.shortcode || '/' AS url,
-               p.likes AS like_count, 0 AS retweet_count,
-               p.comments AS reply_count, p.media_json AS media_json,
-               NULL AS video_json, NULL AS local_media_json,
-               a.categories_json AS categories,
-               a.profile_pic_local AS profile_image_url,
-               NULL AS reply_to_tweet_id, NULL AS quoted_json
-        FROM {S}.posts p
-        LEFT JOIN {S}.accounts a ON p.owner_username = a.username
-        WHERE {where_sql}
-        ORDER BY {TL_ORDER} DESC LIMIT ? OFFSET ?
-    """, params + [PER_PAGE + 1, offset]).fetchall()]
+    # 投稿の取得は出自に委譲する。以前はここに IG の17列射影が
+    # 直書きされていた（ig_bridge と /search にも同じものがあり計3箇所）。
+    src = sources.by_name("ig")
+    rows = src.owner_rows(conn, owner, PER_PAGE + 1, offset,
+                          date_from=date_from, date_to=date_to)
 
     stats = dict(conn.execute(f"""
         SELECT COUNT(*) AS total, COALESCE(SUM(likes), 0) AS total_likes,
@@ -1627,7 +1515,7 @@ def _ig_user_profile(screen_name, date_from, date_to, page, offset):
         pass
 
     has_next = len(rows) > PER_PAGE
-    rows = ig_bridge.attach_media(conn, rows[:PER_PAGE])
+    rows = sources.attach_media_all(conn, rows[:PER_PAGE])
     tweets = [format_tweet(r, get_bookmarked_ids(conn),
                            cache_utils.deleted_urls(conn)) for r in rows]
     next_url = (url_for("user_profile", screen_name=screen_name, page=page + 1,

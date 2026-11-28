@@ -25,6 +25,11 @@ dev/secrets.local.txt
 *.local.txt
 !*.local.example.txt
 
+# .env の控え。完全一致の `.env` だけだと .env.bak-20261128 のような
+# 控えが素通りして、実IPやドメインごとコミットされかける（実際にかけた）。
+.env.*
+!.env.example
+
 # 監視対象の初期データを手元で持たせたいとき用。実アカウント名が入る
 data/accounts_fallback.json
 
