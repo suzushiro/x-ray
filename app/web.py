@@ -66,7 +66,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "56"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "57"
 
 # 外部公開はしない。
 # Tumblr投稿をAPI方式に固定した時点（v35）で、一時公開URLを使う

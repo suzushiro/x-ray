@@ -168,6 +168,54 @@ docker compose exec worker sh -c 'ls /proc/[0-9]*/cmdline | while read f; do tr 
 
 コンテナには含まれない（`Dockerfile.*` は `app/` のみ COPY する）開発用ツール。
 
+### まとめて走らせる（v57）
+
+```bash
+python dev/run_all.py              # 全部（26スイート・30秒ほど）
+python dev/run_all.py route ig     # 名前に含まれるものだけ
+python dev/run_all.py --list       # 一覧
+python dev/run_all.py -v           # 落ちたスイートの出力も出す
+python dev/run_all.py --json       # 機械で読む形
+```
+
+環境変数とダミーデータは**ランナーが用意する**。1スイートにつき
+使い捨てのディレクトリを作って `seed_dummy.py` を流すので、
+走らせる順番に依存しない。終了コードは失敗があれば1。
+
+出力の例:
+
+```
+  通過    x-ray/route_check    51件   0.3秒
+  失敗    x-ray/ig_check       2件失敗 5.1秒
+  依存欠け x-ray/scraper_check  twscrape  0.1秒
+
+=== 通過 24 / 失敗 1 / 依存欠け 1  （計 26 件）===
+```
+
+**依存欠けは検査の失敗と区別する。** `ModuleNotFoundError` を本物の
+失敗と同じ見た目にすると、コンテナを作り直した直後に取り違える
+（実際に取り違えて、無関係なコードを疑った）。
+
+#### なぜランナーを作ったか
+
+それまではスイートを手で並べて回し、**合否を人間が目で見ていた**。
+
+- `dev/` 配下は環境変数8個と `seed_dummy.py` の用意が要る。忘れると
+  「no such table: tweets」という、変更とは無関係な失敗に見える
+- `ig/dev/` 配下は合否の文言が `PASS n / FAIL n` で `dev/` 側と違う
+- スイート名を手で並べていたので**追加したものが漏れた**。
+  `.js` の2本（`extension_check` / `tumblr_ui_check`）は長い間
+  一度も走っていなかった
+- `grep 失敗` で判定していたため、「取得に失敗したら止める」のような
+  **項目名に「失敗」を含む通過**を失敗と誤判定した
+
+ランナー自身の合否判定は `dev/runner_check.py` が検査している。
+他の25スイートの合否をこれが決めるので、ここが間違っていると
+「全部通っている」という嘘が出る。わざと落ちる／依存が無い／
+途中で死ぬ／紛らわしい語を含むスイートを作って分類を確かめている。
+
+### 個別に走らせる
+
 ```bash
 cd dev
 export DB_PATH=/tmp/xtest/data.db IMAGES_DIR=/tmp/xtest/images CACHE_DIR=/tmp/xtest/cache
@@ -180,6 +228,12 @@ python route_check.py   # 全ルートを叩いてステータス＋引用カー
 
 `requirements-web.txt`（flask + waitress のみ）だけを入れた venv で実行すると、
 web が twscrape 非依存であることも同時に検証できる。
+
+### スイートを足すとき
+
+ファイル名を `*_check.py` か `*_check.js` にして `dev/` か `ig/dev/` に
+置くだけ。ランナーが拾う。最後に `=== 全て通過 ===` か
+`=== 失敗 N件: [...] ===` を出し、成功なら終了コード0にすること。
 
 ## クッキー収集ツール（tools/）
 
