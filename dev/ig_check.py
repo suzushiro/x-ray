@@ -273,7 +273,7 @@ check("IGだけのとき件数もIGだけ", _b2.get("illustrator") == "3", str(_
 
 _gal_ig = c.get("/gallery?source=ig").get_data(as_text=True)
 check("ギャラリーでも絞れる",
-      "/ig-cache/" in _gal_ig and "/cache/x" not in _gal_ig)
+      "/media/ig/" in _gal_ig and "/cache/x" not in _gal_ig)
 check("ページ送りに出自が残る",
       "source=ig" in _gal_ig or "ページ送り不要", str("source=ig" in _gal_ig))
 
@@ -291,19 +291,32 @@ r18 = c.get("/?category=R18").get_data(as_text=True)
 check("R18タブでは出る", "caption of IGR18" in r18)
 
 print("\n== [4] メディア ==")
-check("ローカル画像は /ig-cache/ で配られる", "/ig-cache/ab/IGAAA_0.jpg" in html,
-      )
-r = c.get("/ig-cache/ab/IGAAA_0.jpg")
+check("ローカル画像は /media/ig/ で配られる", "/media/ig/ab/IGAAA_0.jpg" in html)
+check("旧 /ig-cache/ のURLは生成しない", "/ig-cache/" not in html)
+r = c.get("/media/ig/ab/IGAAA_0.jpg")
 check("実際に配信できる", r.status_code == 200 and r.data.startswith(b"\xff\xd8"),
       f"status={r.status_code}")
 check("キャッシュ外は配信しない",
+      c.get("/media/ig/../../x/data.db").status_code in (400, 404),
+      str(c.get("/media/ig/../../x/data.db").status_code))
+check("知らない出自は配信しない",
+      c.get("/media/nosuch/a.jpg").status_code == 404,
+      str(c.get("/media/nosuch/a.jpg").status_code))
+
+# 旧URLは残す。すでに配ったページが参照しているため。
+# ただし 301 にすると遡上がリダイレクトで素通りするので、そのまま配信する。
+r = c.get("/ig-cache/ab/IGAAA_0.jpg")
+check("旧URLでもまだ配信できる",
+      r.status_code == 200 and r.data.startswith(b"\xff\xd8"),
+      f"status={r.status_code}")
+check("旧URLでも遡上は弾く",
       c.get("/ig-cache/../../x/data.db").status_code in (400, 404),
       str(c.get("/ig-cache/../../x/data.db").status_code))
 
 gal = c.get("/gallery").get_data(as_text=True)
-check("ギャラリーにIGの画像が出る", "/ig-cache/ab/IGAAA_0.jpg" in gal)
+check("ギャラリーにIGの画像が出る", "/media/ig/ab/IGAAA_0.jpg" in gal)
 check("ギャラリーはカルーセルを1枚ずつ並べる",
-      gal.count("/ig-cache/ab/IGAAA_") == 2, str(gal.count("/ig-cache/ab/IGAAA_")))
+      gal.count("/media/ig/ab/IGAAA_") == 2, str(gal.count("/media/ig/ab/IGAAA_")))
 check("画像の無い投稿はギャラリーに出ない", "IGNOML" not in gal)
 
 print("\n== [5] IGは読むだけ ==")
@@ -326,7 +339,7 @@ check("IGのユーザーページが開く", _u.status_code == 200, str(_u.statu
 _uh = _u.get_data(as_text=True)
 check("その人の投稿だけが出る",
       "caption of IGAAA" in _uh and "caption of IGCOAU" not in _uh)
-check("ローカル画像が使われる", "/ig-cache/" in _uh)
+check("ローカル画像が使われる", "/media/ig/" in _uh)
 check("存在しない投稿主は404",
       c.get("/user/ig:nobody").status_code == 404)
 check("カードからユーザーページへ行ける",
@@ -506,7 +519,24 @@ _chk2.close()
 check("ig-ray側のDBに反映される", _mv == 1, str(_mv))
 check("TLから消える",
       "caption of IGAAA" not in c.get("/?source=ig").get_data(as_text=True))
-check("ミュート一覧に出る", "ig_artist" in c.get("/ig-mutes").get_data(as_text=True))
+check("ミュート一覧に出る", "ig_artist" in c.get("/mutes").get_data(as_text=True))
+# 旧URLはブックマークが切れないよう恒久リダイレクトで残す
+_r301 = c.get("/ig-mutes")
+check("旧 /ig-mutes は301で /mutes へ",
+      _r301.status_code == 301 and _r301.headers["Location"].endswith("/mutes"),
+      f"{_r301.status_code} {_r301.headers.get('Location')}")
+check("旧URLを辿れば一覧に着く",
+      "ig_artist" in c.get("/ig-mutes", follow_redirects=True
+                           ).get_data(as_text=True))
+# 新しいAPIでも同じことができる
+_rn = c.post("/api/mute", data={"username": "ig:ig_artist", "muted": "1"})
+_mn = _rn.get_json() or {}
+check("/api/mute でも切り替えられる", _mn.get("ok") and _mn.get("muted"),
+      f"status={_rn.status_code} {_rn.get_data(as_text=True)[:200]}")
+check("出自を返す", _mn.get("source") == "ig", str(_mn))
+# X にミュートは無い（カテゴリで出し分ける）ので断る
+_mx = c.post("/api/mute", data={"username": "alice_art", "source": "x"})
+check("Xのミュートは断る", _mx.status_code == 400, str(_mx.status_code))
 _m2 = c.post("/api/ig/mute", data={"username": "ig_artist", "muted": "0"}).get_json()
 check("解除できる（ミュート）", _m2.get("ok") and not _m2.get("muted"), str(_m2))
 check("TLに戻る",

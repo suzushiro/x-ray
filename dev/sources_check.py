@@ -231,6 +231,53 @@ class TbSource(sources.Source):
             where.append("b.photos IS NOT NULL AND b.photos != '[]'")
         return " AND ".join(where), params
 
+    # --- 書き込み系 ---
+
+    TB_MEDIA_DIR = os.path.join(BASE, "tbmedia")
+
+    def media_dirs(self):
+        return [self.TB_MEDIA_DIR]
+
+    def bookmark_payload(self, ro, rw, post_id):
+        slug = self.normalize_owner(post_id)
+        row = ro.execute(
+            "SELECT b.slug, b.blog, b.body, b.posted_at, b.photos, g.title,"
+            " g.tags FROM tb.tb_posts b LEFT JOIN tb.tb_blogs g"
+            " ON b.blog = g.blog WHERE b.slug = ?", (slug,)).fetchone()
+        if not row:
+            return None, 0
+        photos = json.loads(row["photos"] or "[]")
+        # 画像の実体をこちら側に確保する（本物のソースと同じ考え方）
+        os.makedirs(self.TB_MEDIA_DIR, exist_ok=True)
+        locals_out = []
+        for i, _ in enumerate(photos):
+            name = f"tb_{slug}_{i}.jpg"
+            fp = os.path.join(self.TB_MEDIA_DIR, name)
+            if not os.path.exists(fp):
+                open(fp, "wb").write(b"\xff\xd8\xff\xd9")
+            locals_out.append(f"/media/tb/{name}")
+        return {
+            "tweet_id": post_id, "screen_name": row["blog"],
+            "display_name": row["title"] or row["blog"],
+            "content": row["body"], "created_at": row["posted_at"],
+            "url": self.post_url_prefix + slug,
+            "media_json": json.dumps(photos),
+            "local_media_json": json.dumps(locals_out),
+            "video_json": None, "categories": row["tags"],
+            "profile_image_url": None, "quoted_json": None,
+        }, len(locals_out)
+
+    def post_media(self, ro, rw, post_id, indices=None):
+        slug = self.normalize_owner(post_id)
+        paths = sorted(
+            os.path.join(self.TB_MEDIA_DIR, f)
+            for f in os.listdir(self.TB_MEDIA_DIR)
+            if f.startswith(f"tb_{slug}_")) \
+            if os.path.isdir(self.TB_MEDIA_DIR) else []
+        if indices is not None:
+            paths = [paths[i] for i in indices if 0 <= i < len(paths)]
+        return paths, self.post_url_prefix + slug, "tb:" + slug
+
     def category_counts(self, conn):
         counts, total = {}, 0
         for r in conn.execute("""
@@ -331,7 +378,55 @@ hs = cl.get("/search?q=ふたつめ").get_data(as_text=True)
 check("検索にも出る", "ふたつめ" in hs, f"len={len(hs)}")
 
 # ---------------------------------------------------------------------
-print("\n== [6] web.py に出自ごとの分岐が戻っていないか ==")
+print("\n== [6] 書き込み系も出自に委譲されているか ==")
+
+# ブックマーク。bookmarks への INSERT は web.py の1箇所だけで、
+# 「どこから引くか」「画像の実体をどう確保するか」は出自が持つ。
+_r = cl.post("/api/bookmark/toggle", data={"tweet_id": "tb:p1"}).get_json()
+check("tbの投稿をブックマークできる", _r and _r.get("ok") and _r.get("bookmarked"),
+      str(_r))
+check("画像の実体を確保した", _r.get("promoted") == 1, str(_r))
+
+_bm = sqlite3.connect(os.environ["DB_PATH"])
+_bm.row_factory = sqlite3.Row
+_row = _bm.execute("SELECT * FROM bookmarks WHERE tweet_id='tb:p1'").fetchone()
+check("本文が入っている", _row and _row["content"] == "タンブラーの投稿",
+      str(dict(_row) if _row else None))
+check("出典URLが入っている",
+      _row and _row["url"] == "https://example.invalid/post/p1")
+check("ローカル画像のパスが入っている",
+      _row and "/media/tb/" in (_row["local_media_json"] or ""))
+_bm.close()
+
+_bh = cl.get("/bookmarks").get_data(as_text=True)
+check("ブックマーク一覧に出る", "タンブラーの投稿" in _bh)
+
+_r2 = cl.post("/api/bookmark/toggle", data={"tweet_id": "tb:p1"}).get_json()
+check("外せる", _r2 and _r2.get("ok") and not _r2.get("bookmarked"), str(_r2))
+
+# メディア配信。ルートを足さずに配れること。
+cl.post("/api/bookmark/toggle", data={"tweet_id": "tb:p1"})
+_m = cl.get("/media/tb/tb_p1_0.jpg")
+check("/media/tb/ で配信できる",
+      _m.status_code == 200 and _m.data.startswith(b"\xff\xd8"),
+      f"status={_m.status_code}")
+check("遡上は弾く",
+      cl.get("/media/tb/../../data.db").status_code in (400, 404),
+      str(cl.get("/media/tb/../../data.db").status_code))
+
+# ミュートを持たない出自は断る（X と同じ扱い）
+_mu = cl.post("/api/mute", data={"username": "tb:myblog"})
+check("ミュートを持たない出自は断る", _mu.status_code == 400,
+      str(_mu.status_code))
+
+# 画像の手動削除は X-Ray 自身のデータだけ。外のアーカイブには書かない。
+_dl = cl.post("/api/media/delete",
+              data={"tweet_id": "tb:p1", "media_index": "0"})
+check("外のアーカイブの画像は消させない", _dl.status_code >= 400,
+      str(_dl.status_code))
+
+# ---------------------------------------------------------------------
+print("\n== [7] web.py に出自ごとの分岐が戻っていないか ==")
 
 web_src = open(os.path.join(os.path.dirname(__file__), "..", "app",
                             "web.py")).read()
@@ -347,6 +442,14 @@ check("メディア解決を名指ししていない",
 # 出自を足しても繋がらなかった（上の [5] がそれを検知する）。
 check("読み取り接続で ig を名指ししていない",
       "g.ig_on = ig_bridge.attach" not in web_src)
+# IG専用のブックマーク経路・ページ丸ごとのコピーが戻っていないこと
+# 関数名を素で探すと**説明のコメントに書いた名前**を拾う（何度も踏んだ罠）。
+# 定義があるかどうかを見る。
+check("IG専用のブックマーク経路が無い", "def _bookmark_ig" not in web_src)
+check("IG専用のユーザーページが無い", "def _ig_user_profile" not in web_src)
+check("bookmarks への INSERT は1箇所",
+      web_src.count("INSERT INTO bookmarks") == 1,
+      str(web_src.count("INSERT INTO bookmarks")))
 
 sources.reset()
 

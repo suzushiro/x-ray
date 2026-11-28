@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IGミュート - X-Ray</title>
+{% include '_style.html' %}
+</head>
+<body>
+<header>
+    <div class="header-left"><h1>🔇 IGミュート</h1></div>
+    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 ダーク</button>
+</header>
+
+{% set active_page = 'mutes' %}
+{% include '_nav.html' %}
+
+<main style="max-width:720px;margin:0 auto;padding:16px">
+    {% if not ig_available %}
+    <div class="health health-error">IGアーカイブを読めていません</div>
+    {% elif not accounts %}
+    <p style="color:var(--text-dim)">ミュート中のアカウントはありません。</p>
+    {% else %}
+    <p style="color:var(--text-dim);font-size:13px;margin-bottom:12px">
+        ミュート中は取得も表示もされません。この設定は IG-Ray と共有しています。
+    </p>
+    {% for a in accounts %}
+    <div class="storage-card" style="display:flex;align-items:center;gap:12px">
+        <div style="flex:1">
+            <b>{{ a.full_name or a.username }}</b>
+            <span style="color:var(--text-dim)">@{{ a.username }}</span>
+            {% if a.reason %}<div class="st-note">{{ a.reason }}</div>{% endif %}
+        </div>
+        <button class="st-btn" onclick="igUnmute(this, '{{ a.username }}')">解除</button>
+    </div>
+    {% endfor %}
+    {% endif %}
+</main>
+
+{% include '_scripts.html' %}
+</body>
+</html>

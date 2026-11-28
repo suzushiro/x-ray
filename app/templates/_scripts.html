@@ -536,7 +536,7 @@ async function igMute(btn, username) {
     fd.set('username', username);
     fd.set('muted', '1');
     try {
-        const res = await fetch('/api/ig/mute', { method: 'POST', body: fd });
+        const res = await fetch('/api/mute', { method: 'POST', body: fd });
         const data = await res.json();
         if (!data.ok) { alert(data.error || 'ミュートできませんでした'); btn.disabled = false; return; }
         // 画面からも消す。再読み込みを待たせない。
@@ -556,7 +556,7 @@ async function igUnmute(btn, username) {
     fd.set('username', username);
     fd.set('muted', '0');
     try {
-        const res = await fetch('/api/ig/mute', { method: 'POST', body: fd });
+        const res = await fetch('/api/mute', { method: 'POST', body: fd });
         const data = await res.json();
         if (data.ok) { location.reload(); return; }
         alert(data.error || '解除できませんでした');

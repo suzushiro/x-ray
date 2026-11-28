@@ -28,6 +28,9 @@ UNION ALL は列名ではなく**位置**で対応するので、並びがずれ
 """
 
 import json
+import os
+import shutil
+from datetime import datetime, timezone
 
 import ig_bridge
 
@@ -200,6 +203,84 @@ class Source:
         """ページ分の行が確定してからローカル画像を解決する（N+1回避）。"""
         return rows
 
+    # ---- 投稿主 ------------------------------------------------------
+
+    def owner_profile(self, conn, owner):
+        """
+        投稿主のプロフィール。user.html に渡す dict、無ければ None。
+        必要なキー: screen_name（URL用）/ handle（表示用）/ display_name /
+        categories / categories_list / profile_image_url / source
+        """
+        raise NotImplementedError
+
+    def owner_stats(self, conn, owner):
+        """
+        投稿主の統計。total / total_likes / total_rts / oldest / newest /
+        with_media / with_video を埋める（取れないものは0やNone）。
+        """
+        raise NotImplementedError
+
+    # ---- 書き込み・取り出し ------------------------------------------
+
+    def bookmark_payload(self, ro, rw, post_id):
+        """
+        ブックマークに保存する1件を組み立てる。
+
+        返すのは (列名→値 の dict, 確保した画像の枚数)。
+        bookmarks への INSERT は呼び出し側が1箇所で行うので、
+        ここでは**値を揃えることと、画像の実体を X-Ray 側に確保すること**
+        だけをやる。見つからなければ (None, 0)。
+
+        画像の実体をこちら側へ持ってくるのが肝。参照だけ持つと
+        「ブックマークしたのに画像が消える」になる（元が消える／
+        キャッシュの保持期間が切れる）。
+        """
+        raise NotImplementedError
+
+    def post_media(self, ro, rw, post_id, indices=None):
+        """
+        Tumblr へ添付する実ファイルを返す。
+
+        返すのは (ファイルパスの配列, 出典URL, 表示用の投稿主)。
+        indices を渡されたら**その順序どおり**に返す
+        （UIが選んだ順に番号を振って見せているため）。
+        """
+        raise NotImplementedError
+
+    # ---- ミュート ----------------------------------------------------
+    #
+    # X にミュートは無い（カテゴリで出し分ける）。できる出自だけが名乗る。
+
+    # 画像の手動削除。X-Ray 自身が持っているデータだけ消せる。
+    # 外から ATTACH しているアーカイブに書くと向こうを壊す。
+    supports_media_delete = False
+
+    supports_mute = False
+
+    def is_muted(self, conn, owner):
+        return False
+
+    def set_mute(self, owner, muted, reason=None):
+        return False
+
+    def muted_accounts(self, conn):
+        return []
+
+    # ---- メディアの配信 ----------------------------------------------
+
+    def media_dirs(self):
+        """
+        `/media/<name>/<path>` で配信するディレクトリ（先に見つかった方を使う）。
+        空なら配信しない。
+        """
+        return []
+
+    def normalize_owner(self, owner):
+        """画面やAPIから来た投稿主の表記を、このソース内部の形に直す。"""
+        if self.id_prefix and str(owner).startswith(self.id_prefix):
+            return str(owner)[len(self.id_prefix):]
+        return owner
+
     # ---- 組み立て ----------------------------------------------------
 
     def timeline_sql(self, conn, category="all", show_r18=False,
@@ -218,6 +299,7 @@ class Source:
 class XSource(Source):
     """X（Twitter）。X-Ray 自身の tweets / accounts テーブル。"""
 
+    supports_media_delete = True        # 自分のデータなので消せる
     name = "x"
     label = "X"
     id_prefix = ""          # XのツイートIDには接頭辞が付かない
@@ -273,6 +355,90 @@ class XSource(Source):
                                      limit=limit, from_sql=fts_from)
         except Exception:
             return super().search(conn, q, limit)
+
+    def owner_profile(self, conn, owner):
+        acc = conn.execute("SELECT * FROM accounts WHERE screen_name = ?",
+                           (owner,)).fetchone()
+        if not acc:
+            return None
+        d = dict(acc)
+        d["handle"] = d["screen_name"]
+        d["categories_list"] = json.loads(d.get("categories") or "[]")
+        d["source"] = self.name
+        return d
+
+    def owner_stats(self, conn, owner):
+        st = dict(conn.execute("""
+            SELECT COUNT(*) as total,
+                   COALESCE(SUM(like_count), 0) as total_likes,
+                   COALESCE(SUM(retweet_count), 0) as total_rts,
+                   MIN(created_at) as oldest,
+                   MAX(created_at) as newest
+            FROM tweets WHERE screen_name = ?
+        """, (owner,)).fetchone() or {})
+        m = conn.execute("""
+            SELECT
+              COALESCE(SUM(CASE WHEN media_json IS NOT NULL
+                                 AND media_json != '[]' THEN 1 ELSE 0 END), 0)
+                AS with_media,
+              COALESCE(SUM(CASE WHEN video_json IS NOT NULL
+                                 AND video_json != '[]' THEN 1 ELSE 0 END), 0)
+                AS with_video
+            FROM tweets WHERE screen_name = ?
+        """, (owner,)).fetchone()
+        st["with_media"] = m["with_media"]
+        st["with_video"] = m["with_video"]
+        return st
+
+    def bookmark_payload(self, ro, rw, post_id):
+        import cache_utils
+        row = rw.execute("""
+            SELECT t.*, a.display_name, a.categories, a.profile_image_url
+            FROM tweets t JOIN accounts a ON t.screen_name = a.screen_name
+            WHERE t.tweet_id = ?
+        """, (post_id,)).fetchone()
+        if not row:
+            return None, 0
+        d = dict(row)
+
+        # キャッシュ → 永続へ昇格（ブックマークした画像は消えないようにする）
+        promoted = 0
+        try:
+            local_paths = json.loads(d.get("local_media_json") or "[]")
+        except Exception:
+            local_paths = []
+        if any(p and p.startswith("/cache/") for p in local_paths):
+            local_paths, promoted = cache_utils.promote(local_paths)
+            d["local_media_json"] = json.dumps(local_paths, ensure_ascii=False)
+            rw.execute("UPDATE tweets SET local_media_json=? WHERE tweet_id=?",
+                       (d["local_media_json"], post_id))
+        return {
+            "tweet_id": d["tweet_id"], "screen_name": d["screen_name"],
+            "display_name": d["display_name"], "content": d["content"],
+            "created_at": d["created_at"], "url": d["url"],
+            "media_json": d.get("media_json"),
+            "local_media_json": d.get("local_media_json"),
+            "video_json": d.get("video_json"),
+            "categories": d.get("categories"),
+            "profile_image_url": d.get("profile_image_url"),
+            "quoted_json": d.get("quoted_json"),
+        }, promoted
+
+    def post_media(self, ro, rw, post_id, indices=None):
+        import media_utils
+        paths = media_utils.local_image_paths(post_id, rw, indices)
+        row = rw.execute(
+            "SELECT url, screen_name FROM tweets WHERE tweet_id=?",
+            (post_id,)).fetchone() or rw.execute(
+            "SELECT url, screen_name FROM bookmarks WHERE tweet_id=?",
+            (post_id,)).fetchone()
+        url = (row["url"] if row else "") or ""
+        owner = (row["screen_name"] if row else "") or ""
+        return paths, url, owner
+
+    def media_dirs(self):
+        from cache_utils import CACHE_DIR, IMAGES_DIR
+        return [IMAGES_DIR, CACHE_DIR]
 
     def category_counts(self, conn):
         # accounts.categories の組み合わせは高々アカウント数ぶんしか無いので
@@ -389,6 +555,180 @@ class IgSource(Source):
     def attach_media(self, conn, rows):
         return self._b.attach_media(conn, rows)
 
+    def media_dirs(self):
+        return [self._b.IG_CACHE_DIR] if self._b.IG_CACHE_DIR else []
+
+    def owner_profile(self, conn, owner):
+        acc = conn.execute(
+            f"SELECT username, full_name, categories_json, profile_pic_local "
+            f"FROM {self.schema}.accounts WHERE username = ?",
+            (owner,)).fetchone()
+        if not acc:
+            return None
+        return {"screen_name": self.id_prefix + owner,   # URL用（ig: 付き）
+                "handle": owner,                        # 画面に出す名前
+                "display_name": acc["full_name"] or owner,
+                "categories": acc["categories_json"],
+                "categories_list": json.loads(acc["categories_json"] or "[]"),
+                "profile_image_url": acc["profile_pic_local"],
+                "source": self.name}
+
+    def owner_stats(self, conn, owner):
+        S = self.schema
+        st = dict(conn.execute(f"""
+            SELECT COUNT(*) AS total, COALESCE(SUM(likes), 0) AS total_likes,
+                   0 AS total_rts, MIN(date_utc) AS oldest,
+                   MAX(date_utc) AS newest
+            FROM {S}.posts WHERE owner_username = ?
+        """, (owner,)).fetchone() or {})
+        st["with_media"] = conn.execute(f"""
+            SELECT COALESCE(SUM(CASE WHEN media_json IS NOT NULL
+                                      AND media_json != '[]' THEN 1 ELSE 0 END), 0)
+                   AS n
+            FROM {S}.posts WHERE owner_username = ?
+        """, (owner,)).fetchone()["n"]
+        # is_video のような列は ig-ray 側の都合で有無が変わる。
+        # 統計が1つ欠けるだけでページごと落とさない。
+        try:
+            st["with_video"] = conn.execute(
+                f"SELECT COALESCE(SUM(is_video), 0) AS n FROM {S}.posts "
+                "WHERE owner_username = ?", (owner,)).fetchone()["n"]
+        except Exception:
+            st["with_video"] = 0
+        return st
+
+    def bookmark_payload(self, ro, rw, post_id):
+        """
+        IG の投稿を X-Ray のブックマークにコピーする。
+
+        画像は **X-Ray 側の永続領域に実体をコピーする。**
+        ig-ray のキャッシュは向こうの保持期間で消えるので、参照だけ持つと
+        「ブックマークしたのに画像が消える」になる。X 側がキャッシュから
+        永続へ昇格させているのと同じ考え方。
+        コピー先は X-Ray の持ち物なので、読み取り専用の前提は崩れない。
+
+        **ig-ray 側には書かない。**
+        """
+        from cache_utils import IMAGES_DIR
+        if not self.available(ro):
+            return None, 0
+        code = self._b.shortcode_of(post_id)
+        S = self.schema
+        row = ro.execute(
+            f"SELECT p.shortcode, p.owner_username, p.caption, p.date_utc,"
+            f" p.likes, p.comments, p.media_json, a.full_name,"
+            f" a.categories_json, a.profile_pic_local "
+            f"FROM {S}.posts p LEFT JOIN {S}.accounts a"
+            f" ON p.owner_username = a.username WHERE p.shortcode = ?",
+            (code,)).fetchone()
+        if not row:
+            return None, 0
+
+        try:
+            media = json.loads(row["media_json"] or "[]")
+        except (TypeError, ValueError):
+            media = []
+        remotes = [m.get("image_url") or "" for m in media
+                   if isinstance(m, dict)]
+
+        by_index = {}
+        for r in ro.execute(
+            f"SELECT media_index, local_path FROM {S}.media_index "
+            f"WHERE shortcode=?", (code,)
+        ):
+            if r["local_path"]:
+                by_index[r["media_index"]] = r["local_path"]
+
+        locals_out, copied = [], 0
+        os.makedirs(IMAGES_DIR, exist_ok=True)
+        for i, m in enumerate(media):
+            idx = m.get("index", i) if isinstance(m, dict) else i
+            src = self._b.local_file(by_index.get(idx, ""))
+            if not src:
+                locals_out.append(None)
+                continue
+            ext = os.path.splitext(src)[1] or ".jpg"
+            name = f"ig_{code}_{idx}{ext}"
+            dst = os.path.join(IMAGES_DIR, name)
+            try:
+                if not os.path.exists(dst):
+                    shutil.copyfile(src, dst)
+                    copied += 1
+                locals_out.append(f"/images/{name}")
+            except Exception as e:
+                print(f"[!] IG画像のコピーに失敗 {src}: {type(e).__name__}: {e}")
+                locals_out.append(None)
+
+        return {
+            "tweet_id": post_id,
+            "screen_name": row["owner_username"],
+            "display_name": row["full_name"] or row["owner_username"],
+            "content": row["caption"],
+            "created_at": row["date_utc"],
+            "url": f"{self._b.POST_URL_PREFIX}{code}/",
+            "media_json": json.dumps(remotes, ensure_ascii=False),
+            "local_media_json": json.dumps(locals_out, ensure_ascii=False),
+            "video_json": None,
+            "categories": row["categories_json"],
+            "profile_image_url": row["profile_pic_local"],
+            "quoted_json": None,
+        }, copied
+
+    def post_media(self, ro, rw, post_id, indices=None):
+        """
+        ig-ray 側の実体を優先し、無ければ X-Ray のブックマークに
+        コピーしてある実体を使う。向こうの保持期間で元が消えても
+        投稿できるようにするため。
+        """
+        from cache_utils import IMAGES_DIR
+        if self.available(ro):
+            info = self._b.post_info(ro, post_id, indices)
+            if info and info["paths"]:
+                return (info["paths"], info["source_url"],
+                        self.id_prefix + info["owner"])
+
+        row = rw.execute(
+            "SELECT url, screen_name, local_media_json FROM bookmarks "
+            "WHERE tweet_id=?", (post_id,)).fetchone()
+        if not row:
+            return [], "", ""
+        try:
+            locals_ = json.loads(row["local_media_json"] or "[]")
+        except (TypeError, ValueError):
+            locals_ = []
+        order = [i for i, p in enumerate(locals_) if p]
+        if indices is not None:
+            order = [i for i in indices if i in order]
+        paths = []
+        for i in order:
+            fp = os.path.join(IMAGES_DIR, os.path.basename(locals_[i]))
+            if os.path.exists(fp) and fp not in paths:
+                paths.append(fp)
+        return (paths, row["url"] or "",
+                self.id_prefix + (row["screen_name"] or ""))
+
+    # --- ミュート。ig-ray の accounts.is_muted を直接書くので向こうの画面とも揃う ---
+
+    supports_mute = True
+
+    def is_muted(self, conn, owner):
+        if not self.available(conn):
+            return False
+        r = conn.execute(
+            f"SELECT COALESCE(is_muted,0) AS m FROM {self.schema}.accounts "
+            "WHERE username=?", (owner,)).fetchone()
+        return bool(r["m"]) if r else False
+
+    def set_mute(self, owner, muted, reason=None):
+        return self._b.set_mute(owner, muted, reason)
+
+    def muted_accounts(self, conn):
+        return self._b.muted_accounts(conn)
+
+    def normalize_owner(self, owner):
+        """ig: が付いていても受ける。"""
+        return self._b.shortcode_of(owner) or owner
+
 
 def _json_list(s):
     try:
@@ -442,6 +782,12 @@ def by_name(name):
         if s.name == name:
             return s
     return None
+
+
+def name_for_id(post_id, default="x"):
+    """投稿IDから出自名。分からなければ default。"""
+    s = for_id(post_id)
+    return s.name if s else default
 
 
 def for_id(post_id):

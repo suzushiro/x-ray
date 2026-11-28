@@ -262,7 +262,7 @@ def cache_url(local_path):
     ig-ray の local_path を X-Ray が配信できるURLに直す。
 
     ig-ray 自身も `/cache/` で配っているが、**X-Ray の `/cache/` と衝突する**
-    ので、こちらでは `/ig-cache/` に載せ替える。
+    ので、こちらでは `/media/ig/` に載せ替える。
     実体が無いときは None を返し、呼び出し側はリモートURLに落ちる。
     """
     rel = cache_rel(local_path)
@@ -272,7 +272,7 @@ def cache_url(local_path):
         return None          # ディレクトリトラバーサル防止
     if not os.path.exists(os.path.join(IG_CACHE_DIR, rel)):
         return None
-    return "/ig-cache/" + rel
+    return "/media/ig/" + rel
 
 
 def local_file(local_path):

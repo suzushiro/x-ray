@@ -139,5 +139,35 @@ for path in ("/"):
     if not ok_tags:
         fails.append("style tag mismatch")
 
+# v56 で統合したルート。旧URLは残す（ブックマークと既に配ったページのため）。
+print()
+_c = app.test_client()
+for _p, _want in (("/mutes", (200,)),
+                  ("/ig-mutes", (301,)),
+                  ("/api/mute", (400, 405)),
+                  ("/api/ig/mute", (400, 405)),
+                  ("/media/ig/nope.jpg", (404,)),
+                  ("/media/nosuch/x.jpg", (404,)),
+                  ("/ig-cache/nope.jpg", (404,))):
+    _r = _c.get(_p)
+    _ok = _r.status_code in _want
+    print(f"{'OK ' if _ok else 'NG '} {_p} → {_r.status_code}（期待 {_want}）")
+    if not _ok:
+        fails.append((_p, _r.status_code))
+
+# 旧URLの行き先が新URLであること
+_r = _c.get("/ig-mutes")
+_ok = _r.status_code == 301 and _r.headers.get("Location", "").endswith("/mutes")
+print(f"{'OK ' if _ok else 'NG '} /ig-mutes の行き先が /mutes")
+if not _ok:
+    fails.append(("/ig-mutes redirect", _r.headers.get("Location")))
+
+# 旧メディアURLは**リダイレクトしない**。301にすると遡上が素通りする。
+_r = _c.get("/ig-cache/../../x/data.db")
+_ok = _r.status_code in (400, 404)
+print(f"{'OK ' if _ok else 'NG '} 旧メディアURLでも遡上を弾く → {_r.status_code}")
+if not _ok:
+    fails.append(("/ig-cache traversal", _r.status_code))
+
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)} 件: {fails} ==="))
 sys.exit(1 if fails else 0)

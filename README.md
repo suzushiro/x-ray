@@ -764,11 +764,44 @@ UNION ALL は列名ではなく**位置**で対応するため、並びがずれ
 **8重に登録されて UNION が8回重なり同じ投稿が8件ずつ出た。**
 足し算で持つと「何回読み込まれたか」に答えが依存する。
 
+### 書き込み系も出自に委譲（v56）
+
+ブックマーク・Tumblr投稿・ミュート・メディア配信も `Source` の口に移した。
+
+| | 以前 | いま |
+|---|---|---|
+| ブックマーク | `_bookmark_ig()` という別経路＋INSERT文が2本 | `Source.bookmark_payload()`、INSERTは1箇所 |
+| Tumblr投稿の添付 | `is_ig` で分岐 | `Source.post_media()` |
+| ユーザーページ | `_ig_user_profile()` でページ丸ごとコピー | `owner_profile()` / `owner_stats()` / `owner_rows()` |
+| ミュート | `/api/ig/mute` `/ig-mutes` | `/api/mute` `/mutes`（`supports_mute` を名乗る出自だけ） |
+| メディア配信 | `/ig-cache/<path>` | `/media/<出自>/<path>`（`media_dirs()`） |
+| 画像の手動削除 | `is_ig_id` で拒否 | `supports_media_delete`（X-Ray 自身のデータだけ） |
+
+**能力で判定する。** X にミュートは無い（カテゴリで出し分ける）し、
+外から ATTACH しているアーカイブに書くと向こうを壊す。出自ごとに
+`supports_mute` / `supports_media_delete` を名乗らせて、持たない出自は
+400 で断る。
+
+### URL の変更（旧URLは残す）
+
+| 旧 | 新 | 旧URLの扱い |
+|---|---|---|
+| `/ig-mutes` | `/mutes` | 301 リダイレクト |
+| `/api/ig/mute` | `/api/mute` | 同じ処理を呼ぶ別名（古いタブ対策） |
+| `/ig-cache/<path>` | `/media/ig/<path>` | **そのまま配信**（301にしない） |
+
+メディアの旧URLを 301 にしてはいけない。`/ig-cache/../../x/data.db` の
+ような遡上がリダイレクトでそのまま通り、`send_from_directory` の
+安全判定を飛び越えてしまう（実際にそれで検査が落ちた）。
+
+`/media/` のパス判定は `send_from_directory` に任せる。自分で
+`os.path.exists` を先に見て判断すると、ディレクトリの外にあるファイルを
+「ある」と判定してしまう。
+
 ### この版でやっていないこと
 
-ブックマーク・Tumblr投稿・ミュートの書き込み系と、`/ig-cache/` の
-メディア配信はまだ出自ごとの分岐が残っている（`_bookmark_ig` /
-`/api/ig/mute` / `/ig-mutes` / `/ig-cache/`）。URL が変わるので別の版で扱う。
+全文検索の索引（`tweets_fts`）はスクレイパーだけが書くので、
+ブックマークとIGはFTSに乗っていない。検索の挙動が出自によって違う。
 
 ## 全滅が続いたときの待機（v54）
 
