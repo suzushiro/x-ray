@@ -209,11 +209,21 @@ check("混在", web.map_tags(["ギャル", "photographer"]) == ["girl", "photogr
 check("空リスト", web.map_tags([]) == [])
 check("Noneでも落ちない", web.map_tags(None) == [])
 
-# 変換表は環境変数で差し替えられる
+# 変換表は環境変数で差し替えられる。
+#
+# 変換表は presenters.py が import 時に読む。web を reload しても
+# presenters は sys.modules から再利用されるので**古い値が残る**。
+# 設定を持つモジュールから順に reload すること（これで一度落とした）。
 import importlib
+
+
+def _reload_with_env():
+    importlib.reload(web.presenters)
+    importlib.reload(web)
+    web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+
 os.environ["TUMBLR_TAG_MAP"] = '{"ギャル":"gal","R18":"nsfw","news":""}'
-importlib.reload(web)
-web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+_reload_with_env()
 check("環境変数で上書きできる", web.map_tags(["ギャル"]) == ["gal"], str(web.map_tags(["ギャル"])))
 check("空文字指定でタグから除外", web.map_tags(["news", "art"]) == ["art"],
       str(web.map_tags(["news", "art"])))
@@ -221,14 +231,12 @@ check("変換後の重複を潰す", web.map_tags(["R18", "nsfw"]) == ["nsfw"],
       str(web.map_tags(["R18", "nsfw"])))
 
 os.environ["TUMBLR_TAG_MAP"] = "これはJSONではない"
-importlib.reload(web)
-web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+_reload_with_env()
 check("不正なJSONでも既定値で動く", web.map_tags(["ギャル"]) == ["girl"],
       str(web.map_tags(["ギャル"])))
 
 del os.environ["TUMBLR_TAG_MAP"]
-importlib.reload(web)
-web.tumblr_client.API_BASE = "http://127.0.0.1:5391/v2"
+_reload_with_env()
 c = web.app.test_client()
 
 print("\n== タグがボタンに埋まるか ==")

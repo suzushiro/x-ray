@@ -10,8 +10,6 @@ from flask import Flask, render_template, request, redirect, url_for, jsonify, s
 
 JST = timezone(timedelta(hours=9))
 
-# スペースURLの検出パターン
-SPACE_URL_RE = re.compile(r'https?://(?:twitter\.com|x\.com)/i/spaces/([A-Za-z0-9_-]+)')
 
 from flask import abort, g
 from werkzeug.exceptions import NotFound
@@ -22,36 +20,14 @@ import media_utils
 import tumblr_client
 import ig_bridge
 import sources        # 出自（X / IG）の登録と共通列の約束
+import presenters     # DBの行を画面用に整える
+import health         # 「黙って止まっている」の見張り
+import ig_migrate     # IG-Ray から引き継ぐ一度だけの移行
+from ig_migrate import import_ig_presets
+from presenters import format_tweet, map_tags, utc_key
 
 # 出自ごとの違いは sources.py の中だけで閉じる。ここに X 用/IG 用の
 # 分岐を増やさないこと（増やしたくなったら sources.Source に口を足す）。
-
-# カテゴリ名 → Tumblrタグ の変換表。
-# X-Ray内部のカテゴリ名をそのままタグにすると都合が悪いものを置き換える。
-# JSONで上書きできる: TUMBLR_TAG_MAP='{"ギャル":"girl","R18":"nsfw"}'
-# 空文字を指定するとそのカテゴリはタグから除外される。
-_DEFAULT_TAG_MAP = {"ギャル": "girl"}
-try:
-    _raw_tag_map = os.environ.get("TUMBLR_TAG_MAP", "").strip()
-    TUMBLR_TAG_MAP = json.loads(_raw_tag_map) if _raw_tag_map else dict(_DEFAULT_TAG_MAP)
-    if not isinstance(TUMBLR_TAG_MAP, dict):
-        raise ValueError("dictではありません")
-except (ValueError, TypeError) as _e:
-    print(f"[!] TUMBLR_TAG_MAP を解釈できません（既定値を使います）: {_e}")
-    TUMBLR_TAG_MAP = dict(_DEFAULT_TAG_MAP)
-
-
-def map_tags(categories):
-    """カテゴリ名リストをTumblr用のタグリストに変換する。空になるものは落とす。"""
-    out = []
-    for c in categories or []:
-        t = TUMBLR_TAG_MAP.get(c, c)
-        if not t:
-            continue          # 空文字指定＝タグにしない
-        if t not in out:      # 変換で重複しうるので潰す
-            out.append(t)
-    return out
-
 
 # これ以上の枚数を選んだら自動的に下書きにする。
 # センシティブ寄りの投稿をまとめて公開すると凍結リスクが上がるため、
@@ -66,7 +42,7 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "57"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "58"
 
 # 外部公開はしない。
 # Tumblr投稿をAPI方式に固定した時点（v35）で、一時公開URLを使う
@@ -126,76 +102,6 @@ def ig_on():
     return bool(g.get("ig_on"))
 
 
-def import_ig_presets():
-    """
-    ig-ray 側に覚えてあったキャプション／タグを、**一度だけ** X-Ray に取り込む。
-
-    以前は /api/tumblr/presets が毎回 ig-ray の DB を読んで穴埋めしていたが、
-    その作りには2つ問題がある:
-      - X-Ray 側で消したプリセットが、ig-ray 側に残っていると次回復活する
-      - ig-ray の DB を外した日に、覚えていた内容がまとめて消える
-    ig-ray はもうメンテしないので、取り込みは一度で終わらせ、
-    以後は X-Ray 側の tumblr_presets だけを見る。
-
-    取り込み済みの印は app_meta に残す。印があれば ig-ray の DB が
-    繋がっていても二度と読まない（消したものが戻らないように）。
-    """
-    conn = get_conn()
-    try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS app_meta (
-                key        TEXT PRIMARY KEY,
-                value      TEXT,
-                updated_at TEXT
-            )
-        """)
-        conn.commit()
-        done = conn.execute(
-            "SELECT 1 FROM app_meta WHERE key='ig_presets_imported'").fetchone()
-        if done:
-            return 0
-
-        if not ig_bridge.attach(conn):
-            # IGが繋がっていない。印は付けない（繋いだ日に取り込めるように）。
-            return 0
-
-        rows = []
-        try:
-            rows = conn.execute(
-                f"SELECT owner_username, caption, tags "
-                f"FROM {ig_bridge.SCHEMA}.tumblr_presets").fetchall()
-        except Exception:
-            # 古い ig-ray にはこのテーブルが無い。取り込むものが無いのと同じ
-            # なので、印を付けて以後は見ない。
-            rows = []
-    finally:
-        conn.close()
-
-    # attach したコネクションは query_only なので書き込み用に開き直す。
-    conn = get_conn()
-    try:
-        n = 0
-        for r in rows:
-            key = ig_bridge.ID_PREFIX + r["owner_username"]
-            cur = conn.execute("""
-                INSERT INTO tumblr_presets (screen_name, caption, tags, updated_at)
-                VALUES (?,?,?,?)
-                ON CONFLICT(screen_name) DO NOTHING
-            """, (key, r["caption"] or "", r["tags"] or "",
-                  datetime.now(timezone.utc).isoformat()))
-            n += cur.rowcount or 0
-        conn.execute("""
-            INSERT INTO app_meta (key, value, updated_at) VALUES (?,?,?)
-            ON CONFLICT(key) DO UPDATE SET
-                value=excluded.value, updated_at=excluded.updated_at
-        """, ("ig_presets_imported", str(n),
-              datetime.now(timezone.utc).isoformat()))
-        conn.commit()
-        if n:
-            print(f"[*] ig-ray のTumblrプリセットを {n} 件取り込みました")
-        return n
-    finally:
-        conn.close()
 
 
 @app.teardown_appcontext
@@ -225,17 +131,17 @@ COOKIES_FILE = os.environ.get("TWITTER_COOKIES_FILE", "/data/cookies.txt")
 DB_PATH = os.environ.get("DB_PATH", "/data/data.db")
 # IMAGES_DIR(永続) / CACHE_DIR(表示用) は cache_utils で定義
 PER_PAGE = 100  # ページネーション件数
+SEARCH_LIMIT = 200   # 検索結果の上限（出自ごとに引いてから混ぜる）
 
-# scraper.py が出口（回線分離）の状態を scrape_log に残すときの擬似アカウント名。
-# アカウント一覧には出さず、専用のバナーで扱う。
-EGRESS_LOG_NAME = "__egress__"
-RUN_LOG_NAME = "__run__"
-
-# 擬似アカウントを個別に列挙すると、増えたときに漏れて
-# 「__run__ が2回エラー」のような表示が出る。前後が __ の名前をまとめて除く。
-# LIKE ではなく GLOB。LIKE だと _ がワイルドカード扱いで ESCAPE 指定が必要になり、
-# そのエスケープ記述を一度書き損じてトップページを 500 にした。GLOB は _ がそのまま。
-NOT_PSEUDO_SQL = "screen_name NOT GLOB '__*__'"
+# 巡回そのものや出口IPの状態は run_log（kind 列で区別）に入る。
+# scrape_log には実アカウントだけが入るので、一覧から擬似名を除く
+# 条件をクエリごとに配る必要が無い。
+#
+# 以前は scrape_log の screen_name に `__run__` / `__egress__` を
+# 相乗りさせていて、除外条件（NOT_PSEUDO_SQL）を全クエリに書いていた。
+# その ESCAPE 指定を書き損じてトップページを500にしたことがある。
+EGRESS_KIND = "egress"
+RUN_KIND = "run"
 
 
 def get_categories():
@@ -282,83 +188,53 @@ def get_bookmarked_ids(conn):
         return set()
 
 
-def format_tweet(d, bookmarked_ids=None, deleted=None):
-    """DBの行dict（tweets JOIN accounts想定）を表示用に整形する"""
-    # 出自。タイムラインのSQLは列で持ってくるが、ブックマーク表のように
-    # 列が無い経路もあるので tweet_id の接頭辞から補う。
-    if not d.get("source"):
-        d["source"] = sources.name_for_id(d.get("tweet_id"))
-    d["media"] = json.loads(d.get("media_json") or "[]")
-    d["videos"] = json.loads(d.get("video_json") or "[]")
-    d["local_media"] = json.loads(d.get("local_media_json") or "[]")
-    d["categories_list"] = json.loads(d.get("categories") or "[]")
 
-    # 表示用画像: ローカルがあればローカル優先、なければリモートURL。
-    # 手動削除済みのURLは除外し、何枚消したかを持たせる。
-    deleted = deleted or set()
-    display_imgs = []
-    media_idx = []
-    deleted_count = 0
-    for i, remote in enumerate(d["media"]):
-        if remote in deleted:
-            deleted_count += 1
-            continue
-        local = d["local_media"][i] if i < len(d["local_media"]) else None
-        display_imgs.append(local if local else remote)
-        media_idx.append(i)     # 削除ボタンが送る元インデックス
-    d["display_imgs"] = display_imgs
-    d["media_idx"] = media_idx
-    d["deleted_count"] = deleted_count
 
-    # Tumblr共有用: ローカル保存済み画像が1枚でもあるか（削除済み除外後）
-    d["has_local_media"] = any(
-        (d["local_media"][i] if i < len(d["local_media"]) else None)
-        for i, remote in enumerate(d["media"]) if remote not in deleted
-    )
-    # カテゴリをタグ用にbase64で渡す（| e がJSONを壊す既知問題の回避）。
-    # 表示用のカテゴリ名ではなく、変換表を通したTumblrタグを渡す。
-    # ensure_ascii は既定のまま（True）。日本語カテゴリを \uXXXX に逃がさないと
-    # JS側の atob() が UTF-8 バイトを扱えず壊れる。
-    _tags = map_tags(d["categories_list"])
-    d["categories_b64"] = base64.b64encode(
-        json.dumps(_tags).encode()).decode() if _tags else ""
+def source_arg():
+    v = (request.args.get("source") or "all").strip().lower()
+    return v if v in SOURCES else "all"
 
-    d["media_b64"] = base64.b64encode(
-        json.dumps(display_imgs).encode()
-    ).decode() if display_imgs else ""
 
+def timeline_rows(conn, category, limit, offset, show_r18=False,
+                  require_media=False, source="all"):
+    """
+    登録されている出自を時系列に混ぜた1ページぶんの行を返す。
+
+    source に出自名を渡せばそれだけに絞れる。読めない出自は黙って外れる。
+
+    以前は「IGだけ」「混合」「Xだけ」の3分岐をここに書いていた。
+    出自が増えるたびに分岐が増える形だったのを、sources の登録を
+    並べるだけにした。混合が失敗したときに X 単独へ落とす保険は
+    そのまま残す（ig-ray 側の事情でこちらを落とさないため）。
+    """
+    active = sources.active(conn, source)
+    if not active:
+        return []
+
+    sql, params = sources.union_timeline_sql(
+        conn, active, category, show_r18, require_media)
     try:
-        dt_utc = datetime.fromisoformat(d["created_at"].replace("Z", "+00:00"))
-        dt_jst = dt_utc.astimezone(JST)
-        d["created_at_jst"] = dt_jst.strftime("%Y-%m-%d %H:%M")
-        d["created_at_dt"] = dt_jst.strftime("%Y%m%d%H%M")
-    except Exception:
-        d["created_at_jst"] = (d.get("created_at") or "")[:16].replace("T", " ")
-        d["created_at_dt"] = (d.get("created_at") or "")[:16].replace("-", "").replace("T", "").replace(":", "")
+        return [dict(r) for r in conn.execute(
+            sql, (*params, limit, offset)).fetchall()]
+    except Exception as e:
+        print(f"[!] タイムラインに失敗（{','.join(s.name for s in active)}）: "
+              f"{type(e).__name__}: {e}")
 
-    # スペースURLの検出（本文にspaces/URLが含まれていたら専用カード表示用の情報をセット）
-    content = d.get("content") or ""
-    m = SPACE_URL_RE.search(content)
-    d["space"] = {"url": m.group(0), "id": m.group(1)} if m else None
-
-    d["is_bookmarked"] = bool(bookmarked_ids and d.get("tweet_id") in bookmarked_ids)
-    d["self_reply"] = None
-
-    # 引用RTの引用元
-    d["quoted"] = None
-    if d.get("quoted_json"):
+    # 複数を混ぜて失敗したときだけ、最初の出自だけで出し直す。
+    # 全部まとめて落とすと、片方の都合で画面が真っ白になる。
+    if len(active) > 1:
+        head = active[:1]
+        sql, params = sources.union_timeline_sql(
+            conn, head, category, show_r18, require_media)
         try:
-            q = json.loads(d["quoted_json"])
-            # 引用元の投稿日時をJSTへ
-            try:
-                qdt = datetime.fromisoformat((q.get("created_at") or "").replace("Z", "+00:00"))
-                q["created_at_jst"] = qdt.astimezone(JST).strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                q["created_at_jst"] = ""
-            d["quoted"] = q
-        except Exception:
-            d["quoted"] = None
-    return d
+            return [dict(r) for r in conn.execute(
+                sql, (*params, limit, offset)).fetchall()]
+        except Exception as e:
+            print(f"[!] {head[0].name} 単独でも失敗: {type(e).__name__}: {e}")
+    return []
+
+
+
 
 
 @app.route("/media/<source>/<path:filename>")
@@ -432,129 +308,31 @@ TL_ORDER = sources.TL_ORDER
 SOURCES = sources.names()
 
 
-def source_arg():
-    v = (request.args.get("source") or "all").strip().lower()
-    return v if v in SOURCES else "all"
-
-
-def timeline_rows(conn, category, limit, offset, show_r18=False,
-                  require_media=False, source="all"):
+def _ig_env(name, default):
     """
-    登録されている出自を時系列に混ぜた1ページぶんの行を返す。
+    IG向けの設定を読む。短い `IG_*` を優先し、旧 `IG_RAY_*` も読む。
 
-    source に出自名を渡せばそれだけに絞れる。読めない出自は黙って外れる。
-
-    以前は「IGだけ」「混合」「Xだけ」の3分岐をここに書いていた。
-    出自が増えるたびに分岐が増える形だったのを、sources の登録を
-    並べるだけにした。混合が失敗したときに X 単独へ落とす保険は
-    そのまま残す（ig-ray 側の事情でこちらを落とさないため）。
+    IG-Ray を畳んだので名前を `IG_*` に寄せたいが、既存の `.env` は
+    `IG_RAY_*` で書かれている。**両方読む**ことで、書き換えを強制しない。
+    （IG-Ray 自身が insta-ray から改名したときも同じやり方をしている。）
     """
-    active = sources.active(conn, source)
-    if not active:
-        return []
-
-    sql, params = sources.union_timeline_sql(
-        conn, active, category, show_r18, require_media)
-    try:
-        return [dict(r) for r in conn.execute(
-            sql, (*params, limit, offset)).fetchall()]
-    except Exception as e:
-        print(f"[!] タイムラインに失敗（{','.join(s.name for s in active)}）: "
-              f"{type(e).__name__}: {e}")
-
-    # 複数を混ぜて失敗したときだけ、最初の出自だけで出し直す。
-    # 全部まとめて落とすと、片方の都合で画面が真っ白になる。
-    if len(active) > 1:
-        head = active[:1]
-        sql, params = sources.union_timeline_sql(
-            conn, head, category, show_r18, require_media)
-        try:
-            return [dict(r) for r in conn.execute(
-                sql, (*params, limit, offset)).fetchall()]
-        except Exception as e:
-            print(f"[!] {head[0].name} 単独でも失敗: {type(e).__name__}: {e}")
-    return []
-
-
-# 取得が「黙って止まる」のを原因に関係なく見張るしきい値（時間）。
-# 出口IPの判定で12日止まったとき、入れたのは「出口の異常をログに残す」で、
-# 原因を1つ塞いだだけだった。想定していない死に方は必ず残るので、
-# **最後に取れた時刻だけ**を見る見張りを別に置く。
-# 15分巡回なので3時間＝12回ぶん空いたら異常とみなす。Xの一時的な不調で
-# 鳴らない程度には鈍く、半日放置はしない程度には敏感な値として選んだ。
-try:
-    STALE_HOURS = float(os.environ.get("SCRAPE_STALE_HOURS", "3") or 3)
-except ValueError:
-    print("[!] SCRAPE_STALE_HOURS が数値ではありません（既定の3を使います）")
-    STALE_HOURS = 3.0
-
-
-def _utc_key(d):
-    """表示用の行を時系列に並べるためのキー。
-
-    created_at のオフセットが X と IG で揃っていないので、
-    文字列のままでは比較できない（UTCに直してから比べる）。
-    """
-    try:
-        t = datetime.fromisoformat(str(d.get("created_at") or "").replace("Z", "+00:00"))
-        if t.tzinfo is None:
-            t = t.replace(tzinfo=timezone.utc)
-        return t
-    except (TypeError, ValueError):
-        return datetime.min.replace(tzinfo=timezone.utc)
+    for key in (f"IG_{name}", f"IG_RAY_{name}"):
+        v = os.environ.get(key)
+        if v is not None and v != "":
+            return v
+    return default
 
 
 # IG側の見張り。巡回間隔（秒）の何倍で異常とみなすか。
 try:
-    IG_INTERVAL_SEC = float(os.environ.get("IG_RAY_INTERVAL", "21600") or 21600)
-    IG_STALE_INTERVALS = float(os.environ.get("IG_RAY_STALE_INTERVALS", "3") or 3)
+    IG_INTERVAL_SEC = float(_ig_env("INTERVAL", "21600") or 21600)
+    IG_STALE_INTERVALS = float(_ig_env("STALE_INTERVALS", "3") or 3)
 except ValueError:
+    print("[!] IG_INTERVAL / IG_STALE_INTERVALS が数値ではありません"
+          "（既定値を使います）")
     IG_INTERVAL_SEC, IG_STALE_INTERVALS = 21600.0, 3.0
 
 
-def check_stale(conn):
-    """
-    最後に取得できてからの経過を見る。異常なら dict、正常なら None。
-
-    成功ログが1件も無いときに黙って None を返してはいけない。
-    scrape_log は7日で刈られるので、**7日以上止まると成功ログごと消えて
-    「何も無い＝正常」に見えてしまう**。一番警告が要る状況で黙る。
-    そこで成功ログが無いときは保存済みツイートの取得時刻で代用する。
-    """
-    if STALE_HOURS <= 0:
-        return None
-
-    row = conn.execute(
-        "SELECT MAX(run_at) AS t FROM scrape_log "
-        f"WHERE status = 'ok' AND {NOT_PSEUDO_SQL}").fetchone()
-    last, basis = (row["t"] if row else None), "log"
-
-    if not last:
-        row = conn.execute("SELECT MAX(fetched_at) AS t FROM tweets").fetchone()
-        last, basis = (row["t"] if row else None), "tweets"
-
-    if not last:
-        return None             # 1件も取ったことがない＝入れたばかり
-
-    try:
-        t = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
-        if t.tzinfo is None:
-            t = t.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return None
-
-    hours = (datetime.now(timezone.utc) - t).total_seconds() / 3600.0
-    if hours <= STALE_HOURS:
-        return None
-    return {
-        "hours": int(hours),
-        "days": round(hours / 24, 1),
-        "since": t.astimezone(JST).strftime("%Y-%m-%d %H:%M"),
-        "limit_h": round(STALE_HOURS, 1),
-        # ログから分かったのか、ツイートの取得時刻で代用したのか。
-        # 代用のときは「ログが刈られるほど長く止まっている」の合図でもある。
-        "basis": basis,
-    }
 
 
 @app.route("/")
@@ -594,13 +372,16 @@ def index():
         except Exception:
             last_run_jst = last_run["run_at"][:16].replace("T", " ") + " UTC"
 
-    stale = check_stale(conn)
+    stale = health.check_stale(conn)
     # IG取得側の健康状態。取り込んだ以上、こちらが出さないと誰も気づけない。
     ig_health = (ig_bridge.health(conn, IG_INTERVAL_SEC, IG_STALE_INTERVALS)
                  if ig_on() else None)
 
     # ヘルス情報: 直近1時間のスクレイプログを集計
-    health = conn.execute("""
+    # 直近1時間の取得結果。モジュールの health（止まっているかの見張り）とは別物。
+    # 同じ名前にしていてローカル変数がモジュールを隠し、
+    # UnboundLocalError で画面が落ちた。
+    recent = conn.execute("""
         SELECT
             COUNT(*) as total,
             COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0) as ok_count,
@@ -609,13 +390,12 @@ def index():
         WHERE run_at > datetime('now', '-1 hour')
     """).fetchone()
 
-    # エラーが続いてるアカウントを抽出（直近3回全部errorのもの）
-    # 擬似アカウント（__egress__ / __run__）はアカウント一覧からは除く。
-    error_accounts = conn.execute(f"""
+    # エラーが続いてるアカウントを抽出（直近3回全部errorのもの）。
+    # scrape_log には実アカウントだけが入るので除外条件は要らない。
+    error_accounts = conn.execute("""
         SELECT screen_name, COUNT(*) as err_count
         FROM scrape_log
         WHERE status = 'error'
-          AND {NOT_PSEUDO_SQL}
           AND run_at > datetime('now', '-3 hours')
         GROUP BY screen_name
         HAVING err_count >= 2
@@ -625,11 +405,11 @@ def index():
 
     # 出口（回線分離）の異常。ログファイルにしか出ないと気づけないので画面に出す。
     egress_alert = conn.execute("""
-        SELECT status, message, run_at FROM scrape_log
-        WHERE screen_name = ?
+        SELECT status, message, run_at FROM run_log
+        WHERE kind = ?
           AND run_at > datetime('now', '-12 hours')
         ORDER BY run_at DESC LIMIT 1
-    """, (EGRESS_LOG_NAME,)).fetchone()
+    """, (EGRESS_KIND,)).fetchone()
 
 
     tweets = [format_tweet(dict(r), bookmarked_ids, deleted_media) for r in rows]
@@ -663,7 +443,7 @@ def index():
         counts=counts,
         total_count=total_count,
         last_run_jst=last_run_jst,
-        health=dict(health) if health else None,
+        health=dict(recent) if recent else None,
         error_accounts=[dict(a) for a in error_accounts],
         egress_alert=dict(egress_alert) if egress_alert else None,
         stale=stale,
@@ -1157,6 +937,14 @@ def api_media_delete():
 
 @app.route("/bookmarks")
 def bookmarks():
+    """
+    ブックマーク一覧。
+
+    整形は format_tweet に通す。以前はこの画面だけ同じ整形を自前で
+    組み立てていて（画像の出し分け・base64・JSTの変換・スペースURLの
+    検出が二重にあった）、片方だけ直す事故が起きる形だった。
+    ブックマーク表に無い列（自己リプライ）だけ後から埋める。
+    """
     conn = db()
     rows = conn.execute("""
         SELECT * FROM bookmarks ORDER BY bookmarked_at DESC
@@ -1165,48 +953,12 @@ def bookmarks():
     deleted = cache_utils.deleted_urls(conn)
     tweets = []
     for r in rows:
-        d = dict(r)
-        # 出自。この画面は format_tweet を通さず自前で組み立てているので
-        # ここでも補う（バッジとリンク先の出し分けに要る）。
-        d["source"] = sources.name_for_id(d.get("tweet_id"))
-        d["media"] = json.loads(d.get("media_json") or "[]")
-        d["videos"] = json.loads(d.get("video_json") or "[]")
-        d["local_media"] = json.loads(d.get("local_media_json") or "[]")
-        d["categories_list"] = json.loads(d.get("categories") or "[]")
-        display_imgs = []
-        media_idx = []
-        deleted_count = 0
-        for i, remote in enumerate(d["media"]):
-            if remote in deleted:
-                deleted_count += 1
-                continue
-            local = d["local_media"][i] if i < len(d["local_media"]) else None
-            display_imgs.append(local if local else remote)
-            media_idx.append(i)
-        d["display_imgs"] = display_imgs
-        d["media_idx"] = media_idx
-        d["deleted_count"] = deleted_count
-        d["media_b64"] = base64.b64encode(json.dumps(display_imgs).encode()).decode() if display_imgs else ""
-
-        # Tumblr投稿ボタン用。トップページ(format_tweet)と同じ情報を持たせる。
-        d["has_local_media"] = any(
-            (d["local_media"][i] if i < len(d["local_media"]) else None)
-            for i, remote in enumerate(d["media"]) if remote not in deleted
-        )
-        _tags = map_tags(d["categories_list"])
-        d["categories_b64"] = base64.b64encode(
-            json.dumps(_tags).encode()).decode() if _tags else ""
-
-        try:
-            dt_jst = datetime.fromisoformat(d["created_at"].replace("Z", "+00:00")).astimezone(JST)
-            d["created_at_jst"] = dt_jst.strftime("%Y-%m-%d %H:%M")
-            d["created_at_dt"] = dt_jst.strftime("%Y%m%d%H%M")
-        except Exception:
-            d["created_at_jst"] = (d.get("created_at") or "")[:16]
-            d["created_at_dt"] = ""
-        m = SPACE_URL_RE.search(d.get("content") or "")
-        d["space"] = {"url": m.group(0), "id": m.group(1)} if m else None
+        d = format_tweet(dict(r), deleted=deleted)
+        # この画面に並ぶのは全部ブックマーク済み。
+        # bookmarked_ids を引き直すより素直。
         d["is_bookmarked"] = True
+        # ブックマーク表は自己リプライを持たない（元ツイートが消えても
+        # 残すためのコピーなので、連なりは追えない）。
         d["self_reply"] = None
         tweets.append(d)
 
@@ -1276,54 +1028,63 @@ def gallery():
 
 @app.route("/search")
 def search():
+    """
+    本文の検索。
+
+    どの出自も**本文の部分一致**で引く。全文検索（FTS5）は使わない —
+    既定のトークナイザが日本語の部分一致を1件も返さないため
+    （sources.XSource の注記に実測値あり）。
+
+    ブックマークも対象にする。ブックマークは元が消えても残す仕組みなのに、
+    **消えた投稿は検索から外れていた**（tweets から消えるため）。
+    残しているのに探せないのでは意味が無い。
+    """
     q = (request.args.get("q") or "").strip()
     results = []
-    if q:
-        conn = db()
-        bookmarked_ids = get_bookmarked_ids(conn)
-        deleted_media = cache_utils.deleted_urls(conn)
-        try:
-            # FTS5で検索
-            rows = conn.execute("""
-                SELECT t.*, a.display_name, a.categories, a.profile_image_url
-                FROM tweets_fts f
-                JOIN tweets t ON t.tweet_id = f.tweet_id
-                JOIN accounts a ON t.screen_name = a.screen_name
-                WHERE tweets_fts MATCH ?
-                ORDER BY t.created_at DESC
-                LIMIT 200
-            """, (q,)).fetchall()
-        except Exception:
-            # FTS非対応時はLIKE検索にフォールバック
-            rows = conn.execute("""
-                SELECT t.*, a.display_name, a.categories, a.profile_image_url
-                FROM tweets t JOIN accounts a ON t.screen_name = a.screen_name
-                WHERE t.content LIKE ?
-                ORDER BY t.created_at DESC LIMIT 200
-            """, (f"%{q}%",)).fetchall()
-        results = [format_tweet(dict(r) | {"source": "x"},
-                                bookmarked_ids, deleted_media) for r in rows]
+    if not q:
+        return render_template("search.html", results=results, query=q,
+                               categories=get_categories())
 
-        # IG も同じ検索語で引いて混ぜる。全文検索の索引は X 側にしか
-        # 無いので IG は本文のLIKE。どちらも共通列で返るので、
-        # 並べ替えは取得後にまとめて行える。
-        #
-        # 以前はここに IG の17列射影が直書きされていた（ig_bridge と
-        # ユーザーページにも同じものがあり計3箇所）。sources が持つ。
-        ro = db_ro()
-        for src in sources.active(ro, "all"):
-            if src.name == "x":
-                continue        # X は上で FTS 込みで引いている
-            try:
-                rows = src.search(ro, q, limit=200)
-                rows = src.attach_media(ro, rows)
-                results += [format_tweet(r, bookmarked_ids, deleted_media)
-                            for r in rows]
-                results.sort(key=_utc_key, reverse=True)
-                results = results[:200]
-            except Exception as e:
-                print(f"[!] {src.name} の検索に失敗（他の出自で続行）: "
-                      f"{type(e).__name__}: {e}")
+    conn = db()
+    ro = db_ro()
+    bookmarked_ids = get_bookmarked_ids(conn)
+    deleted_media = cache_utils.deleted_urls(conn)
+    seen = set()
+
+    for src in sources.active(ro, "all"):
+        try:
+            rows = src.search(ro, q, limit=SEARCH_LIMIT)
+            rows = src.attach_media(ro, rows)
+        except Exception as e:
+            print(f"[!] {src.name} の検索に失敗（他の出自で続行）: "
+                  f"{type(e).__name__}: {e}")
+            continue
+        for r in rows:
+            if r.get("tweet_id") in seen:
+                continue
+            seen.add(r.get("tweet_id"))
+            results.append(format_tweet(r, bookmarked_ids, deleted_media))
+
+    # ブックマークのうち、元の表から引けなかったもの。
+    # 元が消えていてもここには内容のコピーが残っている。
+    try:
+        for r in conn.execute("""
+            SELECT * FROM bookmarks WHERE content LIKE ?
+            ORDER BY created_at DESC LIMIT ?
+        """, (f"%{q}%", SEARCH_LIMIT)):
+            d = dict(r)
+            if d.get("tweet_id") in seen:
+                continue
+            seen.add(d.get("tweet_id"))
+            d = format_tweet(d, bookmarked_ids, deleted_media)
+            d["is_bookmarked"] = True
+            d["self_reply"] = None
+            results.append(d)
+    except Exception as e:
+        print(f"[!] ブックマークの検索に失敗: {type(e).__name__}: {e}")
+
+    results.sort(key=utc_key, reverse=True)
+    results = results[:SEARCH_LIMIT]
 
     return render_template("search.html", results=results, query=q, categories=get_categories())
 
@@ -1511,6 +1272,12 @@ def status():
     logs = conn.execute("""
         SELECT * FROM scrape_log ORDER BY run_at DESC LIMIT 50
     """).fetchall()
+    # 巡回そのものと出口IPの記録。アカウント単位のログに混ぜて出すと
+    # 「__run__ というアカウントが失敗している」ように見えるので表を分ける。
+    runs = conn.execute("""
+        SELECT run_at, kind, status, message FROM run_log
+        ORDER BY id DESC LIMIT 20
+    """).fetchall()
     accounts = conn.execute("""
         SELECT screen_name, display_name, last_scraped_at FROM accounts
         ORDER BY last_scraped_at DESC
@@ -1521,8 +1288,8 @@ def status():
     ro = db_ro()
     ig_backfill = ig_bridge.backfill_jobs(ro) if ig_on() else []
 
-    return render_template("status.html", logs=logs, accounts=accounts,
-                           ig_backfill=ig_backfill)
+    return render_template("status.html", logs=logs, runs=runs,
+                           accounts=accounts, ig_backfill=ig_backfill)
 
 
 if __name__ == "__main__":

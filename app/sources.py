@@ -340,21 +340,18 @@ class XSource(Source):
     def text_where(self, q):
         return "t.content LIKE ?", [f"%{q}%"]
 
-    def search(self, conn, q, limit=200):
-        """
-        X は全文検索の索引（tweets_fts）を持つのでそちらを先に試す。
-        索引はスクレイパーだけが書くので、無い環境／壊れた環境では
-        本文のLIKEに落ちる。
-        """
-        fts_from = (
-            "FROM tweets_fts f\n"
-            "        JOIN tweets t ON t.tweet_id = f.tweet_id\n"
-            "        JOIN accounts a ON t.screen_name = a.screen_name")
-        try:
-            return self.ordered_rows(conn, "tweets_fts MATCH ?", [q],
-                                     limit=limit, from_sql=fts_from)
-        except Exception:
-            return super().search(conn, q, limit)
+    # 全文検索（FTS5）は使わない。
+    #
+    # 既定のトークナイザ（unicode61）は日本語の連なりを**ひとかたまりの
+    # トークン**として扱うので、「猫」「写真」のような部分一致が
+    # **1件も返らない**（実測）。本文が日本語主体の X-Ray では
+    # 検索が機能していないのと同じだった。しかも例外を投げずに
+    # 0件を返すので、LIKE へのフォールバックも働かなかった。
+    #
+    # trigram トークナイザは3文字以上なら引けるが、2文字以下は駄目で、
+    # 索引は tweets 本体より大きい（23万行で本体25MBに対し30〜44MB）。
+    # LIKE + LIMIT は同じ規模で 0.1ms、全件でも62msだったので、
+    # 索引を持つ意味が無い。tweets_fts は v58 で撤去した。
 
     def owner_profile(self, conn, owner):
         acc = conn.execute("SELECT * FROM accounts WHERE screen_name = ?",

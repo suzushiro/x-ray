@@ -198,7 +198,8 @@ finally:
 conn = db.get_conn()
 # 擬似アカウント（巡回そのものの結果）は監視対象ではないので除く
 _rows = dict((r[0], r[1]) for r in conn.execute(
-    "SELECT screen_name, message FROM scrape_log WHERE screen_name NOT LIKE '\\_\\_%' ESCAPE '\\'"
+    # scrape_log には実アカウントしか入らない（巡回・出口は run_log）
+    "SELECT screen_name, message FROM scrape_log"
 ).fetchall())
 conn.close()
 
@@ -216,7 +217,7 @@ print("\n== 全滅が続いたら間隔を空ける ==")
 from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 
 conn = db.get_conn()
-conn.execute("DELETE FROM scrape_log")
+conn.execute("DELETE FROM run_log")
 conn.commit(); conn.close()
 
 check("失敗が無ければ待たない", scraper.backoff_active() is False)
@@ -225,54 +226,71 @@ check("失敗が無ければ待たない", scraper.backoff_active() is False)
 def _put_run(status, minutes_ago, n=1):
     cn = db.get_conn()
     for _ in range(n):
-        cn.execute("INSERT INTO scrape_log (run_at, screen_name, status, message,"
-                   " new_tweets) VALUES (?,?,?,?,0)",
+        cn.execute("INSERT INTO run_log (run_at, kind, status, message)"
+                   " VALUES (?,?,?,?)",
                    ((_dt.now(_tz.utc) - _td(minutes=minutes_ago)).isoformat(),
-                    scraper.RUN_LOG_NAME, status, ""))
+                    scraper.RUN_KIND, status, ""))
     cn.commit(); cn.close()
 
 
 # 1回目の全滅 → 15分あける
 _put_run("run_error", 5)
 check("1回目は15分待つ", scraper.backoff_active() is True)
-conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+conn = db.get_conn(); conn.execute("DELETE FROM run_log"); conn.commit(); conn.close()
 _put_run("run_error", 20)
 check("15分経っていれば走る", scraper.backoff_active() is False)
 
 # 3回続いたら 15*4=60分
-conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+conn = db.get_conn(); conn.execute("DELETE FROM run_log"); conn.commit(); conn.close()
 _put_run("run_error", 30, n=3)
 check("3回続いたら60分待つ", scraper.backoff_active() is True)
 
 # 上限で頭打ち
-conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+conn = db.get_conn(); conn.execute("DELETE FROM run_log"); conn.commit(); conn.close()
 _put_run("run_error", 10000, n=20)
 check("上限を超えたら走る（頭打ち）", scraper.backoff_active() is False)
 
 # 1件でも取れたら解除される
-conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+conn = db.get_conn(); conn.execute("DELETE FROM run_log"); conn.commit(); conn.close()
 _put_run("run_error", 5, n=3)
 scraper.log_run_result(1, 10)
 check("1件でも取れたら解除", scraper.backoff_active() is False)
 
 # 全滅したら記録される
-conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+conn = db.get_conn(); conn.execute("DELETE FROM run_log"); conn.commit(); conn.close()
 scraper.log_run_result(0, 10)
 conn = db.get_conn()
-_r = conn.execute("SELECT status, message FROM scrape_log WHERE screen_name=?",
-                  (scraper.RUN_LOG_NAME,)).fetchone()
+_r = conn.execute("SELECT status, message FROM run_log WHERE kind=?",
+                  (scraper.RUN_KIND,)).fetchone()
 conn.close()
 check("全滅を記録する", _r and _r[0] == "run_error", str(_r))
 check("件数が分かる", _r and "10件すべて失敗" in (_r[1] or ""), str(_r))
 
 # 取得が1件も無い環境（監視対象ゼロ）では全滅扱いにしない
-conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+conn = db.get_conn(); conn.execute("DELETE FROM run_log"); conn.commit(); conn.close()
 scraper.log_run_result(0, 0)
 conn = db.get_conn()
-_n = conn.execute("SELECT COUNT(*) FROM scrape_log WHERE screen_name=?",
-                  (scraper.RUN_LOG_NAME,)).fetchone()[0]
+_n = conn.execute("SELECT COUNT(*) FROM run_log WHERE kind=?",
+                  (scraper.RUN_KIND,)).fetchone()[0]
 conn.close()
 check("監視対象ゼロなら記録しない", _n == 0, str(_n))
+
+# 巡回の記録は scrape_log を汚さない。
+# 以前は screen_name に `__run__` を入れていたので、アカウント単位の
+# ログに「アカウントでないもの」が混ざっていた。
+conn = db.get_conn()
+conn.execute("DELETE FROM run_log"); conn.execute("DELETE FROM scrape_log")
+conn.commit(); conn.close()
+scraper.log_run_result(0, 10)
+scraper.log_egress({"verdict": "proxy_bypassed", "ok": False, "reason": "迂回"})
+conn = db.get_conn()
+_sl = conn.execute("SELECT COUNT(*) FROM scrape_log").fetchone()[0]
+_rl = conn.execute("SELECT kind, status FROM run_log ORDER BY id").fetchall()
+conn.close()
+check("scrape_log には入らない", _sl == 0, str(_sl))
+check("run_log に2件入る", len(_rl) == 2, str([tuple(r) for r in _rl]))
+check("巡回と出口を種別で分ける",
+      {r[0] for r in _rl} == {"run", "egress"}, str([tuple(r) for r in _rl]))
 
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
 sys.exit(1 if fails else 0)

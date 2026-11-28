@@ -149,14 +149,9 @@ for tid, when in (("x1", "2026-11-19T11:00:00+09:00"),      # = 02:00 UTC
                  (tid, "x_artist", f"tweet {tid}", when,
                   f"https://x.com/x_artist/status/{tid}",
                   json.dumps([f"https://p/{tid}.jpg"]), json.dumps([None])))
-    # 全文検索の索引はスクレイパーだけが書く（トリガではない）。
-    # 直接INSERTしただけだと検索に出ないので、本番と同じ状態にしておく。
-    try:
-        conn.execute("INSERT INTO tweets_fts (tweet_id, content, screen_name,"
-                     " display_name) VALUES (?,?,?,?)",
-                     (tid, f"tweet {tid}", "x_artist", "X Artist"))
-    except Exception:
-        pass
+    # 全文検索の索引（tweets_fts）は v58 で撤去した。
+    # 検索は本文のLIKEで引くので、tweets に入れておけば出る。
+    # （索引方式のときは、直接INSERTしただけでは検索に出なかった。）
 conn.commit()
 conn.close()
 
@@ -690,14 +685,22 @@ check("最古の日付は日付だけ", "2024-05-01<" in _sh)
 check("メッセージが読める", "ページ6まで" in _sh)
 check("操作方法を書いてある", "ig-backfill" in _sh)
 
-# 擬似アカウントはログでは読める名前にする（一覧からは除くが、ここでは見たい）
+# 巡回そのものの記録は run_log（kind='run'）に入り、アカウント単位の
+# ログとは別表で出す。v58 までは scrape_log の screen_name に
+# `__run__` と入れていたので、アカウント欄にアカウントでないものが出ていた。
 _xc = sqlite3.connect(os.environ["DB_PATH"])
-_xc.execute("INSERT INTO scrape_log (run_at, screen_name, status, message,"
-            " new_tweets) VALUES (datetime('now'),'__run__','run_error','全滅',0)")
+_xc.execute("INSERT INTO run_log (run_at, kind, status, message)"
+            " VALUES (datetime('now'),'run','run_error','全滅')")
+_xc.execute("INSERT INTO run_log (run_at, kind, status, message)"
+            " VALUES (datetime('now'),'egress','warn','出口が変わった')")
 _xc.commit(); _xc.close()
 _sh = _status_html()
-check("__run__ は読める名前で出る", "取得まるごと" in _sh)
-check("__run__ の生の名前は出さない", "@__run__" not in _sh)
+check("巡回の記録が読める名前で出る", "巡回まるごと" in _sh)
+check("出口の記録も出る", "出口IP" in _sh and "出口が変わった" in _sh)
+check("擬似アカウント名は出さない",
+      "@__run__" not in _sh and "@__egress__" not in _sh)
+check("アカウント別の表とは分かれている",
+      "巡回・出口の記録" in _sh and "アカウント別 実行ログ" in _sh)
 
 # IGが繋がっていなければ節ごと出さない（空の表を出すと壊れたように見える）
 _off = dict(os.environ)

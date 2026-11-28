@@ -40,17 +40,32 @@
     {% endfor %}
 </table>
 
-<h2>直近の実行ログ</h2>
+{# 巡回そのものと出口IPの記録。アカウント単位のログとは別表にする。
+   混ぜると「__run__ というアカウントが失敗している」ように見える。 #}
+{% if runs %}
+<h2>巡回・出口の記録</h2>
+<table>
+    <tr><th>時刻</th><th>種別</th><th>結果</th><th>メッセージ</th></tr>
+    {% for r in runs %}
+    <tr>
+        <td>{{ (r.run_at or '')[:19].replace('T', ' ') }}</td>
+        <td>{% if r.kind == 'egress' %}🌐 出口IP
+            {%- elif r.kind == 'run' %}🔁 巡回まるごと
+            {%- else %}{{ r.kind }}{% endif %}</td>
+        <td class="{{ r.status }}">{{ r.status }}</td>
+        <td>{{ r.message }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% endif %}
+
+<h2>アカウント別 実行ログ</h2>
 <table>
     <tr><th>実行時刻</th><th>対象</th><th>結果</th><th>新規件数</th><th>メッセージ</th></tr>
     {% for l in logs %}
     <tr>
         <td>{{ l.run_at[:19].replace('T', ' ') }}</td>
-        {# 擬似アカウントは一覧では隠すが、このログでは中身を見たいので
-           読める名前に置き換えて出す。 #}
-        <td>{% if l.screen_name == '__egress__' %}🌐 出口IP
-            {%- elif l.screen_name == '__run__' %}🔁 取得まるごと
-            {%- else %}@{{ l.screen_name }}{% endif %}</td>
+        <td>@{{ l.screen_name }}</td>
         <td class="{{ l.status }}">{{ l.status }}</td>
         <td>{{ l.new_tweets }}</td>
         <td>{{ l.message }}</td>

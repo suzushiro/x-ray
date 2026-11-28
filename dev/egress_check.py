@@ -1,4 +1,5 @@
 """検証専用: proxy環境変数の効き方と check-egress の挙動を確認する。"""
+import sqlite3
 import re
 import os
 import socket
@@ -157,9 +158,14 @@ r = run_check("203.0.113.10", "203.0.113.9", direct_fail=True)
 check("判定できなければ止める",
       r.get("ok") is False and r.get("verdict") == "undetermined", str(r))
 
-print("\n== scrape_log への記録 ==")
+print("\n== run_log への記録 ==")
 def run_log(verdict_case):
-    """log_egress が scrape_log に残すかを実DBで確かめる。"""
+    """log_egress が run_log に残すかを実DBで確かめる。
+
+    v58 で scrape_log の擬似アカウント `__egress__` から
+    run_log の kind='egress' に移した。アカウント名の列に
+    アカウントでないものを入れるのをやめたため。
+    """
     import json, shutil
     shutil.rmtree("/tmp/xeglog", ignore_errors=True)
     os.makedirs("/tmp/xeglog", exist_ok=True)
@@ -177,7 +183,9 @@ import db, scraper
 db.init_db()
 scraper.log_egress({verdict_case!r})
 c = sqlite3.connect("/tmp/xeglog/data.db")
-rows = c.execute("SELECT screen_name, status, message FROM scrape_log").fetchall()
+rows = c.execute("SELECT kind, status, message FROM run_log").fetchall()
+extra = c.execute("SELECT COUNT(*) FROM scrape_log").fetchone()[0]
+print("SCRAPELOG", extra)
 print("MARK", json.dumps(rows))
 '''
     r = subprocess.run([sys.executable, "-c", code], capture_output=True,
@@ -191,7 +199,8 @@ rows = run_log({"verdict": "match", "ok": True, "reason": "x"})
 check("正常時は書かない", rows == [], str(rows))
 rows = run_log({"verdict": "proxy_ip_changed", "ok": True, "reason": "IPが変わった"})
 check("続行した警告は warn で残る",
-      len(rows) == 1 and rows[0][0] == "__egress__" and rows[0][1] == "warn", str(rows))
+      len(rows) == 1 and rows[0][0] == "egress" and rows[0][1] == "warn",
+      str(rows))
 rows = run_log({"verdict": "proxy_bypassed", "ok": False, "reason": "迂回"})
 check("中止は error で残る",
       len(rows) == 1 and rows[0][1] == "error", str(rows))
@@ -211,11 +220,12 @@ check("health-error のCSSがある", ".health-error" in st)
 print("\n== 実際に画面に出るか（レンダリング）==")
 # 文字列grepだけでは足りない。マクロの with context 漏れを一度それで見逃したので、
 # 本物の Flask にダミーDBを食わせて HTML を描かせて確かめる。
-def render_index(egress_row, extra_rows=()):
+def render_index(egress_row, extra_rows=(), run_rows=()):
     """egress_row=(status, message) を scrape_log に入れて / を描画する。
 
     extra_rows=[(screen_name, status, message), ...] を渡すと
-    そのログ行も一緒に入れる（擬似アカウントの除外確認用）。
+    scrape_log にもその行を入れる。
+    run_rows=[(kind, status, message), ...] は run_log 側に入れる。
     """
     import json, shutil
     shutil.rmtree("/tmp/xegweb", ignore_errors=True)
@@ -238,14 +248,25 @@ def render_index(egress_row, extra_rows=()):
             + repr(_row[0]) + ", " + repr(_row[1]) + ", " + repr(_row[2]) + "))\n"
             "c.commit(); c.close()\n"
         )
+    for _r in run_rows:
+        ins += (
+            "\nimport sqlite3\n"
+            "from datetime import datetime, timezone\n"
+            "c = sqlite3.connect('/tmp/xegweb/data.db')\n"
+            "c.execute('INSERT INTO run_log (run_at, kind, status, message)"
+            " VALUES (?,?,?,?)',\n"
+            "          (datetime.now(timezone.utc).isoformat(), "
+            + repr(_r[0]) + ", " + repr(_r[1]) + ", " + repr(_r[2]) + "))\n"
+            "c.commit(); c.close()\n"
+        )
     if egress_row:
         ins += (f'''
 import sqlite3
 from datetime import datetime, timezone
 c = sqlite3.connect("/tmp/xegweb/data.db")
-c.execute("INSERT INTO scrape_log (run_at, screen_name, status, message, new_tweets)"
-          " VALUES (?,?,?,?,0)",
-          (datetime.now(timezone.utc).isoformat(), "__egress__",
+c.execute("INSERT INTO run_log (run_at, kind, status, message)"
+          " VALUES (?,?,?,?)",
+          (datetime.now(timezone.utc).isoformat(), "egress",
            {egress_row[0]!r}, {egress_row[1]!r}))
 c.commit(); c.close()
 ''')
@@ -273,31 +294,47 @@ check("中止バナーが出る", "🛑 取得停止（回線分離）" in html,
 check("理由がそのまま読める", "proxyを迂回しています（テスト用の文言）" in html)
 check("強調スタイルが当たる", "health-error" in html)
 check("擬似アカウント名を表に出さない", "@__egress__" not in html)
+check("出口の記録はアカウント欄に出ない", "__egress__" not in html)
 
 html = render_index(("warn", "回線側の出口IPが変わりました（テスト用の文言）"))
 check("警告バナーが出る", "⚠️ 回線の出口IPが変わりました" in html, html[:200])
 check("警告では取得停止と言わない", "🛑 取得停止（回線分離）" not in html)
 check("擬似アカウント名を表に出さない（警告時）", "@__egress__" not in html)
 
-# 擬似アカウント（__egress__ / __run__）が「エラーが続いているアカウント」の
-# 一覧に出てこないこと。__run__ を足したとき、ここが素通りして
-# 「__run__ が2回エラー」と表示されかけた。
-# 一覧は「status='error' が直近3時間に2回以上」で拾う。
-# 擬似名も同じ条件を満たす行を入れないと素通りしてしまう（一度それで
-# 検査が効いていなかった）ので、各2行ずつ入れる。
-# __run__ は実際には run_error で記録されるが、将来 error に変わっても
-# 一覧に出ないことを確かめたいのでここでは error で入れる。
+# 「エラーが続いているアカウント」の一覧に、アカウントでないものが
+# 出てこないこと。
+#
+# v58 までは scrape_log の screen_name に `__run__` / `__egress__` を
+# 相乗りさせていて、一覧から除く条件を全クエリに配る必要があった。
+# その ESCAPE 指定を書き損じてトップページを500にしたことがある。
+# いまは **scrape_log に実アカウントしか入らない**ので、
+# 除外条件そのものが要らない。
+#
+# 一覧は「status='error' が直近3時間に2回以上」で拾うので、
+# 本物のアカウントが拾われることを確かめる（条件を満たさない行を
+# 入れると検査が空回りする。一度それをやった）。
 html = render_index(None, extra_rows=[
-    ("__run__", "error", "全滅"),
-    ("__run__", "error", "全滅"),
-    ("__egress__", "error", "迂回"),
-    ("__egress__", "error", "迂回"),
     ("alice_art", "error", "本物のアカウントの失敗"),
     ("alice_art", "error", "本物のアカウントの失敗"),
 ])
-check("__run__ が一覧に出ない", "__run__" not in html)
-check("__egress__ が一覧に出ない", "__egress__" not in html)
 check("本物のアカウントの失敗は出る", "alice_art" in html)
+
+# 出口・巡回の記録は run_log にあり、アカウント一覧には現れない
+html = render_index(None, run_rows=[
+    ("run", "run_error", "全滅"),
+    ("run", "run_error", "全滅"),
+    ("egress", "error", "迂回"),
+])
+check("巡回の記録はアカウント一覧に出ない", "__run__" not in html)
+check("出口の記録はアカウント一覧に出ない", "__egress__" not in html)
+
+# scrape_log 側に擬似名が入っていないこと（移行後の状態）
+_c = sqlite3.connect("/tmp/xegweb/data.db")
+_pseudo = _c.execute(
+    "SELECT COUNT(*) FROM scrape_log WHERE screen_name GLOB '__*__'"
+).fetchone()[0]
+_c.close()
+check("scrape_log に擬似名が入らない", _pseudo == 0, str(_pseudo))
 
 html = render_index(None)
 check("正常時はバナーを出さない",
@@ -460,6 +497,63 @@ check("スクレイプ前に自動チェックする", 'if EXPECTED_EGRESS_IP:' 
 check("失敗時は exit 1", "sys.exit(1)" in sc)
 check("clear-egress-log サブコマンドがある", '"clear-egress-log"' in sc)
 check("迂回時だけ止める文言", "分離が確認できないため" in sc)
+
+# ---------------------------------------------------------------------
+print("\n== IG向け設定の新旧どちらの名前でも読めるか ==")
+
+# IG-Ray を畳んだので名前を IG_* に寄せたいが、既存の .env は IG_RAY_* で
+# 書かれている。**書き換えを強制しない**こと（compose で両方受ける）。
+_cmp = (HERE / ".." / "docker-compose.yml").read_text()
+_short_ok, _missing = [], []
+for _m in re.finditer(r"\$\{IG_RAY_([A-Z0-9_]+)", _cmp):
+    _n = _m.group(1)
+    if ("${IG_" + _n + ":-") in _cmp:
+        _short_ok.append(_n)
+    else:
+        _missing.append(_n)
+check("compose が短い名前も受ける", not _missing,
+      f"受けていない: {sorted(set(_missing))}")
+check("受けている数が妥当", len(set(_short_ok)) >= 20, str(len(set(_short_ok))))
+
+# コンテナに渡す側の名前は変えない。変えると ig/app/ を直す必要が出る
+# （あちらは無改変が原則）。
+check("コンテナ内の変数名は IG_RAY_* のまま",
+      "    IG_RAY_SLEEP_MIN:" in _cmp and "\n    IG_SLEEP_MIN:" not in _cmp)
+
+
+def _ig_interval(**extra):
+    """与えた環境で web.py が読み取った値を返す。"""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("IG_INTERVAL", "IG_RAY_INTERVAL",
+                        "IG_STALE_INTERVALS", "IG_RAY_STALE_INTERVALS")}
+    env.update({"DB_PATH": "/tmp/xegweb/data.db"})
+    env.update(extra)
+    code = (f"import sys; sys.path.insert(0, {str(APP)!r})\n"
+            "import web; print('V', web.IG_INTERVAL_SEC, web.IG_STALE_INTERVALS)")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, timeout=120, env=env)
+    for line in r.stdout.splitlines():
+        if line.startswith("V "):
+            return line
+    return "ERR " + r.stderr[-200:]
+
+
+check("web が短い名前を読む",
+      _ig_interval(IG_INTERVAL="111", IG_STALE_INTERVALS="4")
+      == "V 111.0 4.0", _ig_interval(IG_INTERVAL="111",
+                                     IG_STALE_INTERVALS="4"))
+check("web が旧名も読む",
+      _ig_interval(IG_RAY_INTERVAL="222").startswith("V 222.0"),
+      _ig_interval(IG_RAY_INTERVAL="222"))
+check("両方あれば新しい名前を優先",
+      _ig_interval(IG_INTERVAL="111",
+                   IG_RAY_INTERVAL="222").startswith("V 111.0"),
+      _ig_interval(IG_INTERVAL="111", IG_RAY_INTERVAL="222"))
+check("何も無ければ既定値",
+      _ig_interval().startswith("V 21600.0 3.0"), _ig_interval())
+check("数値でなければ既定値に落ちる",
+      _ig_interval(IG_INTERVAL="あ").startswith("V 21600.0"),
+      _ig_interval(IG_INTERVAL="あ"))
 
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
 sys.exit(1 if fails else 0)

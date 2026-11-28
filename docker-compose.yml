@@ -17,36 +17,36 @@ x-ig-worker-base: &ig-worker-base
     dockerfile: Dockerfile.ig-worker
   image: x-ray-ig-worker:latest
   # /data はホスト側と共有するので母艦のユーザーに合わせる
-  user: "${IG_RAY_UID:-1000}:${IG_RAY_GID:-1000}"
+  user: "${IG_UID:-${IG_RAY_UID:-1000}}:${IG_GID:-${IG_RAY_GID:-1000}}"
   volumes:
     # IG-Ray のデータ領域をそのまま使う。取得側はここに書き、
     # X-Ray の web は同じ場所を /ig-data に読み取り専用の作法で読む。
-    - "${IG_RAY_DATA_DIR:-./data/ig-ray-empty}:/data"
+    - "${IG_DATA_DIR:-${IG_RAY_DATA_DIR:-./data/ig-ray-empty}}:/data"
   environment:
-    IG_RAY_DB: "${IG_RAY_DB:-}"
+    IG_RAY_DB: "${IG_DB:-${IG_RAY_DB:-}}"
     IG_RAY_SESSIONS: /data/sessions
     IG_RAY_CACHE: /data/cache
-    IG_RAY_LOGIN_USER: "${IG_RAY_LOGIN_USER:-}"
-    IG_RAY_DOWNLOAD_VIDEOS: "${IG_RAY_DOWNLOAD_VIDEOS:-0}"
-    IG_RAY_SLEEP_MIN: "${IG_RAY_SLEEP_MIN:-3}"
-    IG_RAY_SLEEP_MAX: "${IG_RAY_SLEEP_MAX:-8}"
-    IG_RAY_MAX_SLEEP: "${IG_RAY_MAX_SLEEP:-60}"
-    IG_RAY_POSTS_ONLY: "${IG_RAY_POSTS_ONLY:-0}"
-    IG_RAY_FETCH_LOCATION: "${IG_RAY_FETCH_LOCATION:-0}"
-    IG_RAY_VIDEO_URL_PROBE: "${IG_RAY_VIDEO_URL_PROBE:-0}"
-    IG_RAY_BUSY_TIMEOUT_MS: "${IG_RAY_BUSY_TIMEOUT_MS:-60000}"
+    IG_RAY_LOGIN_USER: "${IG_LOGIN_USER:-${IG_RAY_LOGIN_USER:-}}"
+    IG_RAY_DOWNLOAD_VIDEOS: "${IG_DOWNLOAD_VIDEOS:-${IG_RAY_DOWNLOAD_VIDEOS:-0}}"
+    IG_RAY_SLEEP_MIN: "${IG_SLEEP_MIN:-${IG_RAY_SLEEP_MIN:-3}}"
+    IG_RAY_SLEEP_MAX: "${IG_SLEEP_MAX:-${IG_RAY_SLEEP_MAX:-8}}"
+    IG_RAY_MAX_SLEEP: "${IG_MAX_SLEEP:-${IG_RAY_MAX_SLEEP:-60}}"
+    IG_RAY_POSTS_ONLY: "${IG_POSTS_ONLY:-${IG_RAY_POSTS_ONLY:-0}}"
+    IG_RAY_FETCH_LOCATION: "${IG_FETCH_LOCATION:-${IG_RAY_FETCH_LOCATION:-0}}"
+    IG_RAY_VIDEO_URL_PROBE: "${IG_VIDEO_URL_PROBE:-${IG_RAY_VIDEO_URL_PROBE:-0}}"
+    IG_RAY_BUSY_TIMEOUT_MS: "${IG_BUSY_TIMEOUT_MS:-${IG_RAY_BUSY_TIMEOUT_MS:-60000}}"
     # IG側のキャッシュ保持期間。渡し忘れると .env に書いても既定のまま黙って動く
-    IG_RAY_CACHE_RETENTION_DAYS: "${IG_RAY_CACHE_RETENTION_DAYS:-30}"
+    IG_RAY_CACHE_RETENTION_DAYS: "${IG_CACHE_RETENTION_DAYS:-${IG_RAY_CACHE_RETENTION_DAYS:-30}}"
     # --- 全件バックフィル ---
-    IG_RAY_BACKFILL_PAGE_SLEEP_MIN: "${IG_RAY_BACKFILL_PAGE_SLEEP_MIN:-600}"
-    IG_RAY_BACKFILL_PAGE_SLEEP_MAX: "${IG_RAY_BACKFILL_PAGE_SLEEP_MAX:-1200}"
-    IG_RAY_BACKFILL_KNOWN_STREAK: "${IG_RAY_BACKFILL_KNOWN_STREAK:-30}"
-    IG_RAY_BACKFILL_QUIET_SEC: "${IG_RAY_BACKFILL_QUIET_SEC:-180}"
-    IG_RAY_BACKFILL_RATELIMIT_BACKOFF: "${IG_RAY_BACKFILL_RATELIMIT_BACKOFF:-3600}"
-    IG_RAY_BACKFILL_IDLE_SLEEP: "${IG_RAY_BACKFILL_IDLE_SLEEP:-300}"
+    IG_RAY_BACKFILL_PAGE_SLEEP_MIN: "${IG_BACKFILL_PAGE_SLEEP_MIN:-${IG_RAY_BACKFILL_PAGE_SLEEP_MIN:-600}}"
+    IG_RAY_BACKFILL_PAGE_SLEEP_MAX: "${IG_BACKFILL_PAGE_SLEEP_MAX:-${IG_RAY_BACKFILL_PAGE_SLEEP_MAX:-1200}}"
+    IG_RAY_BACKFILL_KNOWN_STREAK: "${IG_BACKFILL_KNOWN_STREAK:-${IG_RAY_BACKFILL_KNOWN_STREAK:-30}}"
+    IG_RAY_BACKFILL_QUIET_SEC: "${IG_BACKFILL_QUIET_SEC:-${IG_RAY_BACKFILL_QUIET_SEC:-180}}"
+    IG_RAY_BACKFILL_RATELIMIT_BACKOFF: "${IG_BACKFILL_RATELIMIT_BACKOFF:-${IG_RAY_BACKFILL_RATELIMIT_BACKOFF:-3600}}"
+    IG_RAY_BACKFILL_IDLE_SLEEP: "${IG_BACKFILL_IDLE_SLEEP:-${IG_RAY_BACKFILL_IDLE_SLEEP:-300}}"
     # ログイン検証が続けて失敗したときの再挑戦間隔の上限（秒）
-    IG_RAY_LOGIN_BACKOFF_MAX: "${IG_RAY_LOGIN_BACKOFF_MAX:-86400}"
-    IG_RAY_PROXY: "${IG_RAY_PROXY:-}"
+    IG_RAY_LOGIN_BACKOFF_MAX: "${IG_LOGIN_BACKOFF_MAX:-${IG_RAY_LOGIN_BACKOFF_MAX:-86400}}"
+    IG_RAY_PROXY: "${IG_PROXY:-${IG_RAY_PROXY:-}}"
     # --- 出口の分離（別回線側のプロキシ経由で出す） ---
     # **X側と同じ PROXY_URL を使う。** IG-Ray では HTTP_PROXY という別名で
     # 持っていたが、同じプロキシを2つの名前で指すと、回線のIPが変わったときに
@@ -58,11 +58,12 @@ x-ig-worker-base: &ig-worker-base
     NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1}"
     no_proxy: "${NO_PROXY:-localhost,127.0.0.1}"
     # 期待する出口IPも同じ理由で X側の設定に寄せる。
-    # IG だけ別の回線から出したいときだけ IG_RAY_EXPECT_EGRESS_IP を書く。
-    IG_RAY_EXPECT_EGRESS_IP: "${IG_RAY_EXPECT_EGRESS_IP:-${EXPECTED_EGRESS_IP:-}}"
+    # IG だけ別の回線から出したいときだけ IG_EXPECT_EGRESS_IP を書く。
+    # 書かなければ X 側の EXPECTED_EGRESS_IP に従う。
+    IG_RAY_EXPECT_EGRESS_IP: "${IG_EXPECT_EGRESS_IP:-${IG_RAY_EXPECT_EGRESS_IP:-${EXPECTED_EGRESS_IP:-}}}"
     # ig-cron のシェルが読む
-    IG_RAY_INTERVAL: "${IG_RAY_INTERVAL:-21600}"
-    IG_RAY_CRON_LIMIT: "${IG_RAY_CRON_LIMIT:-6}"
+    IG_RAY_INTERVAL: "${IG_INTERVAL:-${IG_RAY_INTERVAL:-21600}}"
+    IG_RAY_CRON_LIMIT: "${IG_CRON_LIMIT:-${IG_RAY_CRON_LIMIT:-6}}"
     TZ: "${TZ:-Asia/Tokyo}"
   restart: "no"
 
@@ -115,7 +116,7 @@ services:
       # SQLite の WAL は読むだけでも -shm を作る必要があり、ig-ray が
       # -wal を残したまま落ちていると :ro では開けずタイムラインごと落ちる。
       # 書き込みは app/ig_bridge.py が PRAGMA query_only で禁じている。
-      - "${IG_RAY_DATA_DIR:-./data/ig-ray-empty}:/ig-data"
+      - "${IG_DATA_DIR:-${IG_RAY_DATA_DIR:-./data/ig-ray-empty}}:/ig-data"
     environment:
       <<: *image-env
       DB_PATH: /data/data.db
@@ -134,8 +135,8 @@ services:
       # 取得が止まっていないかの見張り（時間）。0で無効
       SCRAPE_STALE_HOURS: "${SCRAPE_STALE_HOURS:-3}"
       # IG側の見張り。巡回間隔の何倍で異常とみなすか（IG_RAY_INTERVAL の倍数）
-      IG_RAY_INTERVAL: "${IG_RAY_INTERVAL:-21600}"
-      IG_RAY_STALE_INTERVALS: "${IG_RAY_STALE_INTERVALS:-3}"
+      IG_RAY_INTERVAL: "${IG_INTERVAL:-${IG_RAY_INTERVAL:-21600}}"
+      IG_RAY_STALE_INTERVALS: "${IG_STALE_INTERVALS:-${IG_RAY_STALE_INTERVALS:-3}}"
       TUMBLR_DRAFT_THRESHOLD: "${TUMBLR_DRAFT_THRESHOLD:-3}"
     # web はスクレイピングしないのでproxyは設定しない
     depends_on:
@@ -189,7 +190,7 @@ services:
     <<: *ig-worker-base
     profiles: ["ig-tools"]
     volumes:
-      - "${IG_RAY_DATA_DIR:-./data/ig-ray-empty}:/data"
+      - "${IG_DATA_DIR:-${IG_RAY_DATA_DIR:-./data/ig-ray-empty}}:/data"
       - ./ig/dev:/dev-scripts:ro
       - ./ig/tools:/ig-tools:ro
     entrypoint: ["/usr/bin/tini", "--", "python", "/ig-tools/diag_session.py"]
@@ -199,7 +200,7 @@ services:
     <<: *ig-worker-base
     profiles: ["ig-tools"]
     volumes:
-      - "${IG_RAY_DATA_DIR:-./data/ig-ray-empty}:/data"
+      - "${IG_DATA_DIR:-${IG_RAY_DATA_DIR:-./data/ig-ray-empty}}:/data"
       - ./ig/dev:/dev-scripts:ro
     entrypoint: ["/usr/bin/tini", "--", "python", "/dev-scripts/probe_posts.py"]
     command: []
@@ -255,8 +256,8 @@ services:
     # $ 一つだと compose が自分の変数として空文字に置換してしまう。
     command:
       - |
-        INTERVAL="$${IG_RAY_INTERVAL:-21600}"
-        LIMIT="$${IG_RAY_CRON_LIMIT:-6}"
+        INTERVAL="$${IG_INTERVAL:-${IG_RAY_INTERVAL:-21600}}"
+        LIMIT="$${IG_CRON_LIMIT:-${IG_RAY_CRON_LIMIT:-6}}"
         echo "IG巡回モード: $${INTERVAL}秒ごと / 1アカウント $${LIMIT}件"
         while true; do
           echo "--- $$(date -Iseconds) ---"

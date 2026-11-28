@@ -127,6 +127,74 @@ check("同名の再登録で増えない", len(sources.all_sources()) == before,
       f"{before} → {len(sources.all_sources())}")
 
 # ---------------------------------------------------------------------
+print("\n== [2b] どの出自も必要な口を埋めているか ==")
+
+# 基底クラスの NotImplementedError 任せだと、埋め忘れは
+# **その機能を使った瞬間に500**になって初めて分かる。
+# 実際にこのセッションで、別の編集のついでに XSource から
+# 5メソッドを消してしまい、ユーザーページとブックマークが500になった。
+# 一覧で確かめる。
+REQUIRED = [
+    # (メソッド名, 無いと何が壊れるか)
+    ("from_sql", "一覧・検索・ユーザーページ"),
+    ("projection", "共通列（UNIONの位置対応）"),
+    ("owns", "IDから出自を決める"),
+    ("owner_where", "ユーザーページの絞り込み"),
+    ("date_column", "期間の絞り込み"),
+    ("text_where", "検索"),
+    ("filter_sql", "カテゴリ・R18・メディア有無"),
+    ("category_counts", "カテゴリ別件数"),
+    ("owner_profile", "ユーザーページの見出し"),
+    ("owner_stats", "ユーザーページの統計"),
+    ("bookmark_payload", "ブックマーク"),
+    ("post_media", "Tumblr投稿"),
+    ("media_dirs", "画像の配信"),
+]
+
+for s_ in sources.all_sources():
+    missing = []
+    for name, what in REQUIRED:
+        fn = getattr(type(s_), name, None)
+        base = getattr(sources.Source, name, None)
+        # 基底のまま（＝自分で実装していない）ものを探す。
+        # 基底が中身を持つもの（filter_sql など既定で空を返す類）は
+        # そのままでも動くので、NotImplementedError を投げる口だけ見る。
+        if fn is None:
+            missing.append(f"{name}（{what}）")
+            continue
+        if fn is base:
+            try:
+                src_text = fn.__doc__ or ""
+            except Exception:
+                src_text = ""
+            import inspect
+            try:
+                body = inspect.getsource(fn)
+            except Exception:
+                body = ""
+            if "NotImplementedError" in body:
+                missing.append(f"{name}（{what}）")
+    check(f"{s_.name} が必要な口を埋めている", not missing,
+          f"未実装: {missing}")
+
+# 逆向き: 埋め忘れたソースを作ると検知できること
+class _Half(sources.Source):
+    name = "_half"
+    id_prefix = "half:"
+
+    def from_sql(self):
+        return "FROM tweets t JOIN accounts a ON t.screen_name = a.screen_name"
+
+
+_h = _Half()
+_miss = [n for n, _ in REQUIRED
+         if getattr(type(_h), n, None) is getattr(sources.Source, n, None)
+         and "NotImplementedError" in (
+             __import__("inspect").getsource(getattr(sources.Source, n))
+             if getattr(sources.Source, n, None) else "")]
+check("埋め忘れを検知できる", len(_miss) >= 5, f"検知した未実装: {_miss}")
+
+# ---------------------------------------------------------------------
 print("\n== [3] IDから出自を引く ==")
 
 check("ig: 付きはIG", sources.for_id("ig:ABC").name == "ig")

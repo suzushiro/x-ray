@@ -380,15 +380,11 @@ def save_tweets(screen_name: str, tweets: list):
         if is_new:
             new_count += 1
 
-        # FTS5に同期（重複を避けるため一旦削除して挿入）
-        try:
-            cur.execute("DELETE FROM tweets_fts WHERE tweet_id = ?", (str(t.id),))
-            cur.execute("""
-                INSERT INTO tweets_fts (tweet_id, content, screen_name, display_name)
-                VALUES (?, ?, ?, ?)
-            """, (str(t.id), t.rawContent or "", screen_name, ""))
-        except Exception:
-            pass  # FTS非対応環境では無視
+        # 全文検索の索引（tweets_fts）への同期は v58 で撤去した。
+        # 既定のトークナイザが日本語の部分一致を1件も返さないので
+        # 検索では使えず、索引は tweets 本体より大きかった
+        # （23万行で本体25MBに対し30MB）。検索は本文のLIKEで足りる
+        # （同規模で LIMIT 付き 0.1ms）。
 
     conn.commit()
     conn.close()
@@ -403,6 +399,26 @@ def log_result(screen_name, status, message="", new_tweets=0):
     """, (datetime.now(timezone.utc).isoformat(), screen_name, status, message, new_tweets))
     conn.commit()
     conn.close()
+
+
+def log_run(kind, status, message=""):
+    """
+    巡回そのもの／出口IPの状態を残す。アカウント単位ではないもの。
+
+    以前は scrape_log の screen_name に `__run__` / `__egress__` という
+    擬似アカウント名で相乗りさせていた。アカウント名の列にアカウントで
+    ないものが入るので、一覧や「最後に取れた時刻」から除く条件を
+    全クエリに配る必要があり、その条件を書き損じて画面を500にした。
+    """
+    conn = get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO run_log (run_at, kind, status, message)
+            VALUES (?, ?, ?, ?)
+        """, (datetime.now(timezone.utc).isoformat(), kind, status, message))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 SCRAPE_LOG_RETENTION_DAYS = int(os.environ.get("SCRAPE_LOG_RETENTION_DAYS", "7") or 7)
@@ -509,7 +525,9 @@ async def scrape_all():
 EXPECTED_EGRESS_IP = os.environ.get("EXPECTED_EGRESS_IP", "").strip()
 
 
-EGRESS_LOG_NAME = "__egress__"     # scrape_log に出口の状態を残すときの擬似アカウント名
+# 出口IPの状態は run_log の kind='egress' に入れる。
+# 以前は scrape_log の擬似アカウント名 "__egress__" だった。
+EGRESS_KIND = "egress"
 
 
 def _fetch_global_ip(use_proxy: bool, timeout: int = 15):
@@ -642,13 +660,13 @@ def log_egress(res: dict):
         return                        # 正常時は書かない（ログが膨らむだけ）
     status = "warn" if res.get("ok") else "error"
     try:
-        log_result(EGRESS_LOG_NAME, status, res.get("reason", "")[:500])
+        log_run(EGRESS_KIND, status, res.get("reason", "")[:500])
     except Exception as e:
         print(f"[!] 出口状態のログ記録に失敗: {e}")
 
 
 # 巡回が全滅したことを記録する擬似アカウント名
-RUN_LOG_NAME = "__run__"
+RUN_KIND = "run"
 
 try:
     BACKOFF_MAX_MIN = int(os.environ.get("SCRAPE_BACKOFF_MAX_MIN", "240") or 240)
@@ -656,12 +674,12 @@ except ValueError:
     BACKOFF_MAX_MIN = 240
 
 
-def consecutive_failures(conn, name, statuses):
+def consecutive_failures(conn, kind, statuses):
     """末尾から数えて status が statuses に含まれる行が何件続いているか。"""
     n = 0
     for r in conn.execute(
-            "SELECT status FROM scrape_log WHERE screen_name = ? "
-            "ORDER BY id DESC LIMIT 50", (name,)):
+            "SELECT status FROM run_log WHERE kind = ? "
+            "ORDER BY id DESC LIMIT 50", (kind,)):
         if r["status"] in statuses:
             n += 1
         else:
@@ -680,13 +698,13 @@ def backoff_active() -> bool:
         return False
     conn = get_conn()
     try:
-        n = consecutive_failures(conn, RUN_LOG_NAME, ("run_error",))
+        n = consecutive_failures(conn, RUN_KIND, ("run_error",))
         if n == 0:
             return False
         wait_min = min(15 * (2 ** (n - 1)), BACKOFF_MAX_MIN)
         row = conn.execute(
-            "SELECT run_at FROM scrape_log WHERE screen_name = ? "
-            "ORDER BY id DESC LIMIT 1", (RUN_LOG_NAME,)).fetchone()
+            "SELECT run_at FROM run_log WHERE kind = ? "
+            "ORDER BY id DESC LIMIT 1", (RUN_KIND,)).fetchone()
         if not row:
             return False
         last = datetime.fromisoformat(str(row["run_at"]).replace("Z", "+00:00"))
@@ -716,11 +734,11 @@ def log_run_result(ok_count, total):
     conn = get_conn()
     try:
         if total and ok_count == 0:
-            log_result(RUN_LOG_NAME, "run_error", f"{total}件すべて失敗")
+            log_run(RUN_KIND, "run_error", f"{total}件すべて失敗")
         else:
             # 1件でも取れたらバックオフを解除する
-            if consecutive_failures(conn, RUN_LOG_NAME, ("run_error",)):
-                log_result(RUN_LOG_NAME, "run_ok", f"{ok_count}/{total}件成功")
+            if consecutive_failures(conn, RUN_KIND, ("run_error",)):
+                log_run(RUN_KIND, "run_ok", f"{ok_count}/{total}件成功")
     except Exception as e:
         print(f"[!] 巡回結果のログ記録に失敗: {type(e).__name__}: {e}")
     finally:
@@ -731,8 +749,8 @@ def clear_egress_log() -> int:
     """出口の警告ログを消す。.env を直したあとバナーを黙らせるため。"""
     conn = get_conn()
     try:
-        cur = conn.execute("DELETE FROM scrape_log WHERE screen_name = ?",
-                           (EGRESS_LOG_NAME,))
+        cur = conn.execute("DELETE FROM run_log WHERE kind = ?",
+                           (EGRESS_KIND,))
         conn.commit()
         return cur.rowcount or 0
     finally:

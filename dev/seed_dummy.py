@@ -123,12 +123,9 @@ def main():
               int(tid[-2:]) * 3, int(tid[-2:]), 2,
               j(media), j(video), j(local), reply_to, j(quoted), iso(1)))
 
-        try:
-            cur.execute(
-                "INSERT INTO tweets_fts (tweet_id, content, screen_name, display_name) "
-                "VALUES (?,?,?,?)", (tid, content, sn, sn))
-        except Exception as e:
-            print(f"[!] FTS insert skipped: {e}")
+        # 全文検索の索引（tweets_fts）は v58 で撤去した。
+        # 既定のトークナイザが日本語の部分一致を1件も返さず、
+        # 索引のほうが本体より大きかった。検索は本文のLIKEで足りる。
 
     # ブックマーク（引用RTありを1件、素のものを1件）
     for tid in ("100001", "100007"):

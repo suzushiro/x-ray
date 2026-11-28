@@ -167,7 +167,7 @@ c.execute("INSERT OR REPLACE INTO tweets (tweet_id, screen_name, content, create
           " VALUES ('t1','alice','x',?,?,'[]','[]',?)", (old, "u", old))
 c.commit(); c.close()
 import web
-print("LIMIT", web.STALE_HOURS)
+print("LIMIT", web.health.STALE_HOURS)   # 設定の持ち主は health
 print("STALE", "取得できていません" in web.app.test_client().get("/").get_data(as_text=True))
 '''], capture_output=True, env=env, text=True, timeout=180).stdout
 check("SCRAPE_STALE_HOURS=0 で無効になる",

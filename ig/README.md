@@ -1,7 +1,10 @@
 # ig/ — IG取得系（IG-Ray 4.20 から持ち込み）
 
 X-Ray に IG-Ray を畳むにあたって、**取得側のコードをそのまま持ち込んだ領域**。
-表示と Tumblr 投稿は X-Ray 本体（`app/web.py` + `app/ig_bridge.py`）が担当する。
+表示と Tumblr 投稿は X-Ray 本体（`app/sources.py` + `app/ig_bridge.py`）が担当する。
+
+IG-Ray 側は撤収済み（2026-11-28）。経緯と手順は `../RETIRE_IG_RAY.md`。
+取得はこのディレクトリのコードで続いている。
 
 ## なぜ書き直さないか
 
@@ -60,15 +63,27 @@ ig/
 # profile 付きのサービスは素の build ではビルドされない
 docker compose --profile ig-cron --profile ig-tools --profile ig-backfill build
 
-docker compose run --rm ig-import-cookies    # セッション取り込み
-docker compose run --rm ig-ipcheck           # 出口IPの確認
-docker compose run --rm ig-accounts list     # 監視対象の管理
-docker compose run --rm ig-scrape ユーザー名 --limit 3 --no-media
-docker compose --profile ig-cron up -d       # 定期巡回を有効化
+# ig-* のサービスは全部 profile 付き。--profile を省くと
+# 「service not found」になる（build も run も同じ）
+docker compose --profile ig-tools run --rm ig-import-cookies   # セッション取り込み
+docker compose --profile ig-tools run --rm ig-ipcheck          # 出口IPの確認
+docker compose --profile ig-tools run --rm ig-accounts list    # 監視対象の管理
+docker compose --profile ig-tools run --rm ig-scrape ユーザー名 --limit 3 --no-media
+docker compose --profile ig-cron up -d ig-cron                 # 定期巡回を有効化
+
+# 過去投稿のさかのぼり。進み具合は X-Ray の /status で見える
+docker compose --profile ig-tools run --rm ig-backfill list
+docker compose --profile ig-backfill up -d ig-backfill-worker
 ```
 
 ## テスト
 
+X-Ray 側のランナーがここのスイートも拾う。
+
 ```bash
-cd ig && for t in dev/*.py; do echo "--- $t"; python3 "$t"; done
+python3 dev/run_all.py ig       # ig/dev/ の13スイートだけ
+python3 dev/run_all.py          # X-Ray 側も含めて全部
 ```
+
+個別に走らせるなら `cd ig/dev && python3 backfill_check.py`。
+これらは自己完結しているので環境変数の用意は要らない。
