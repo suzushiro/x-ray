@@ -1,4 +1,5 @@
 """検証専用: proxy環境変数の効き方と check-egress の挙動を確認する。"""
+import re
 import os
 import socket
 import subprocess
@@ -9,6 +10,38 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 APP = HERE / ".." / "app"
+
+# 環境ごとの語が無くても効く一般形の検査。
+# RFC で文書用に予約されたアドレス（203.0.113.x / 192.0.2.x / 198.51.100.x）、
+# ループバック、全アドレス、プライベート帯は見逃す。それ以外の
+# IPv4 らしき文字列が公開ファイルに出ていたら実アドレスの疑い。
+# 直前が "/" や数字・ドットのものは除く。"Chrome/124.0.0.0" のような
+# バージョン表記を実IPと取り違えるため（実際に一度誤検知した）。
+IP_RE = re.compile(r"(?<![\w./])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+IP_ALLOW_RE = re.compile(
+    r"^(?:203\.0\.113\.|192\.0\.2\.|198\.51\.100\.|127\.|0\.0\.0\.0$"
+    r"|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)")
+
+
+def looks_like_ip(s):
+    """各オクテットが0-255か。SVGのパスデータ（3.176.765.84 など）を弾く。"""
+    return all(p.isdigit() and int(p) <= 255 for p in s.split("."))
+# 走査対象は「git が追跡するテキストファイル全部」。
+#
+# 以前はここに公開ファイル名を手で並べていた。そのリストに載っていない
+# app/seed_accounts.py に監視対象62件がベタ書きされたまま、
+# app/templates/manage.html と ig/dev/ に実アカウント名が残ったまま、
+# そして**この走査スクリプト自身**が禁止語リストを抱えたまま通っていた。
+# 名簿を手で保つ方式だと、新しいファイルは必ず検査の外から生まれる。
+ROOT = (HERE / "..").resolve()
+SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "data", "ig-data",
+             "node_modules", "profiles", ".idea", ".vscode"}
+# secrets.local.example.txt は「こういう形の語を書く」という雛形なので
+# プレースホルダが並ぶ。走査すると自分の例に引っかかるため対象外。
+SKIP_NAMES = {"NOTES.md", "secrets.local.txt", "secrets.local.example.txt"}
+SKIP_SUFFIX = {".db", ".db-wal", ".db-shm", ".png", ".jpg", ".jpeg", ".gif",
+               ".webp", ".mp4", ".zip", ".pyc", ".ico", ".woff", ".woff2"}
+
 
 fails = []
 
@@ -166,8 +199,9 @@ check("中止は error で残る",
 print("\n== Web画面に出るか ==")
 wb = (APP / "web.py").read_text()
 check("web.py が出口ログを引く", "egress_alert" in wb)
-check("アカウント一覧から擬似名を除く",
-      "screen_name != ?" in wb and "EGRESS_LOG_NAME" in wb)
+# 擬似名の除外は実装の書き方（!= / NOT LIKE / NOT GLOB）が変わるので、
+# ソース文字列ではなく下の render_index で実際の画面を見て確かめる。
+check("擬似名の除外条件が一箇所にまとまっている", "NOT_PSEUDO_SQL" in wb)
 idx = (APP / "templates" / "index.html").read_text()
 check("index.html が専用バナーを出す", "egress_alert" in idx)
 check("中止と警告を描き分ける", "health-error" in idx)
@@ -177,8 +211,12 @@ check("health-error のCSSがある", ".health-error" in st)
 print("\n== 実際に画面に出るか（レンダリング）==")
 # 文字列grepだけでは足りない。マクロの with context 漏れを一度それで見逃したので、
 # 本物の Flask にダミーDBを食わせて HTML を描かせて確かめる。
-def render_index(egress_row):
-    """egress_row=(status, message) を scrape_log に入れて / を描画する。"""
+def render_index(egress_row, extra_rows=()):
+    """egress_row=(status, message) を scrape_log に入れて / を描画する。
+
+    extra_rows=[(screen_name, status, message), ...] を渡すと
+    そのログ行も一緒に入れる（擬似アカウントの除外確認用）。
+    """
     import json, shutil
     shutil.rmtree("/tmp/xegweb", ignore_errors=True)
     os.makedirs("/tmp/xegweb", exist_ok=True)
@@ -189,8 +227,19 @@ def render_index(egress_row):
         "ACCOUNTS_JSON_PATH": "/tmp/xegweb/a.json", "TWSCRAPE_DB": "/tmp/xegweb/pool.db",
     })
     ins = ""
+    for _row in extra_rows:
+        ins += (
+            "\nimport sqlite3\n"
+            "from datetime import datetime, timezone\n"
+            "c = sqlite3.connect('/tmp/xegweb/data.db')\n"
+            "c.execute('INSERT INTO scrape_log (run_at, screen_name, status,"
+            " message, new_tweets) VALUES (?,?,?,?,0)',\n"
+            "          (datetime.now(timezone.utc).isoformat(), "
+            + repr(_row[0]) + ", " + repr(_row[1]) + ", " + repr(_row[2]) + "))\n"
+            "c.commit(); c.close()\n"
+        )
     if egress_row:
-        ins = (f'''
+        ins += (f'''
 import sqlite3
 from datetime import datetime, timezone
 c = sqlite3.connect("/tmp/xegweb/data.db")
@@ -229,6 +278,26 @@ html = render_index(("warn", "回線側の出口IPが変わりました（テス
 check("警告バナーが出る", "⚠️ 回線の出口IPが変わりました" in html, html[:200])
 check("警告では取得停止と言わない", "🛑 取得停止（回線分離）" not in html)
 check("擬似アカウント名を表に出さない（警告時）", "@__egress__" not in html)
+
+# 擬似アカウント（__egress__ / __run__）が「エラーが続いているアカウント」の
+# 一覧に出てこないこと。__run__ を足したとき、ここが素通りして
+# 「__run__ が2回エラー」と表示されかけた。
+# 一覧は「status='error' が直近3時間に2回以上」で拾う。
+# 擬似名も同じ条件を満たす行を入れないと素通りしてしまう（一度それで
+# 検査が効いていなかった）ので、各2行ずつ入れる。
+# __run__ は実際には run_error で記録されるが、将来 error に変わっても
+# 一覧に出ないことを確かめたいのでここでは error で入れる。
+html = render_index(None, extra_rows=[
+    ("__run__", "error", "全滅"),
+    ("__run__", "error", "全滅"),
+    ("__egress__", "error", "迂回"),
+    ("__egress__", "error", "迂回"),
+    ("alice_art", "error", "本物のアカウントの失敗"),
+    ("alice_art", "error", "本物のアカウントの失敗"),
+])
+check("__run__ が一覧に出ない", "__run__" not in html)
+check("__egress__ が一覧に出ない", "__egress__" not in html)
+check("本物のアカウントの失敗は出る", "alice_art" in html)
 
 html = render_index(None)
 check("正常時はバナーを出さない",
@@ -284,17 +353,10 @@ for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "TWS_PROXY",
 check("NO_PROXY に localhost", "localhost,127.0.0.1" in worker)
 check("web にはproxyを入れない", "HTTPS_PROXY" not in web)
 
-# 秘密の値がリポジトリに残っていないこと
-tracked = ["docker-compose.yml", ".env.example", "README.md",
-           "app/scraper.py", "app/web.py"]
-ip_re = _re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-ALLOWED = {"127.0.0.1", "0.0.0.0", "192.168.0.0"}
-for f in tracked:
-    fp = HERE / ".." / f
-    if not fp.exists():
-        continue
-    found = {ip for ip in ip_re.findall(fp.read_text()) if ip not in ALLOWED}
-    check(f"{f} に生IPが無い", not found, str(sorted(found)))
+# 生IPの検査は後段の「公開ファイルに環境固有の情報が無いか」に一本化した。
+# ここにも別の（弱い）正規表現で同じ検査があり、"Chrome/124.0.0.0" のような
+# バージョン表記を実IPと取り違えていた。判定が2箇所にあると、片方だけ直して
+# もう片方で落ちる。IP_RE / IP_ALLOW_RE / looks_like_ip を共通で使う。
 
 check("compose が ${PROXY_URL} を参照", "${PROXY_URL" in worker)
 check("compose が ${EXPECTED_EGRESS_IP} を参照", "${EXPECTED_EGRESS_IP" in worker)
@@ -311,7 +373,9 @@ ex = (HERE / ".." / ".env.example")
 check(".env.example がある", ex.exists())
 if ex.exists():
     e = ex.read_text()
-    check(".env.example の値は空", not ip_re.findall(e), str(ip_re.findall(e)))
+    # .env.example は雛形なので、IPらしき値が1つでもあればおかしい
+    _found = [ip for ip in IP_RE.findall(e) if looks_like_ip(ip)]
+    check(".env.example の値は空", not _found, str(_found))
     for k in ("PROXY_URL", "EXPECTED_EGRESS_IP"):
         check(f".env.example に {k}", k in e)
 check(".env 実体が同梱されていない", not (HERE / ".." / ".env").exists())
@@ -320,30 +384,71 @@ print("\n== 公開ファイルに環境固有の情報が無いか ==")
 # 実ホスト名・実カテゴリ・実監視垢など、公開したくない語
 # ホスト名・IP・実アカウント名など、公開したくない値。
 # カテゴリ名（ギャル等）はタグ変換の設定例として公開ファイルに出てよいので含めない。
-SECRETS = ["epimetheus", "epi1-doc", "epi1-ubu", "jcom", "JCOM", "au光",
-           "110.173.240.104", "192.168.0.60", "192.168.1.10",
-           "nullzebra", "nemoto_nagi", "suzushiro.io", "jpegmania"]
-PUBLIC = ["README.md", ".env.example", "docker-compose.yml", ".gitignore",
-          "app/scraper.py", "app/web.py", "app/db.py", "app/cache_utils.py",
-          "tools/cookie_harvester.py", "tools/accounts.example.txt",
-          "extension/common.js", "extension/options.html",
-          "app/templates/share.html", "deploy/cloudflared-config.example.yml",
-          "deploy/README.md", "docker-compose.yml"]
+# 環境ごとの語（実ホスト名・実ISP名・実IP・実アカウント名）は
+# dev/secrets.local.txt に1行1語で書く。gitignore 済み。
+#
+# 以前はこのリストを**このファイルに直接**書いていた。公開ファイルを
+# 検査するスクリプト自身が、その禁止語を全部並べて公開していたことになる。
+# （検査する側が漏らしていた。）リストは手元だけに置く。
+SECRETS_FILE = HERE / "secrets.local.txt"
+SECRETS = []
+if SECRETS_FILE.exists():
+    SECRETS = [l.strip() for l in SECRETS_FILE.read_text().splitlines()
+               if l.strip() and not l.startswith("#")]
+
+
+def public_files():
+    out = []
+    for p in sorted(ROOT.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(ROOT)
+        if set(rel.parts) & SKIP_DIRS:
+            continue
+        if p.name in SKIP_NAMES or p.suffix in SKIP_SUFFIX:
+            continue
+        # gitignore 済みのローカル専用ファイル（例は除く）
+        if (".local." in p.name and ".local.example." not in p.name) \
+                or p.name in (".env", "cookies.txt", "tumblr_accounts.json",
+                              "accounts.txt", "accounts_fallback.json"):
+            continue
+        out.append(rel.as_posix())
+    return out
+
+
+PUBLIC = public_files()
+check("走査対象が十分ある", len(PUBLIC) > 30, str(len(PUBLIC)))
+check("走査スクリプト自身も対象", "dev/egress_check.py" in PUBLIC)
+check("監視対象マスタも対象", "app/seed_accounts.py" in PUBLIC)
 for f in PUBLIC:
-    fp = HERE / ".." / f
-    if not fp.exists():
+    fp = ROOT / f
+    try:
+        body = fp.read_text()
+    except (UnicodeDecodeError, OSError):
         continue
-    body = fp.read_text()
     hit = [w for w in SECRETS if w in body]
-    check(f"{f}", not hit, str(hit))
+    # バージョン番号などに紛れるので、行に "version" を含む行は除く
+    bad_ip = sorted({ip for line in body.splitlines()
+                     if "version" not in line.lower()
+                     for ip in IP_RE.findall(line)
+                     if looks_like_ip(ip) and not IP_ALLOW_RE.match(ip)})
+    check(f"{f}", not hit and not bad_ip, str(hit + bad_ip))
 
 print("\n== 作業メモ ==")
 notes = HERE / ".." / "NOTES.local.md"
 # NOTES.local.md は gitignore 済みで配布zipには含まれない。あるときだけ中身を見る。
 if notes.exists():
-    check("実際の構成が書かれている", "jcom-proxy" in notes.read_text())
+    # 中身の語を名指しすると、その語（実ISP名など）がこのファイルに
+    # 残ってしまうので、書かれているかどうかだけ見る。
+    check("中身が空でない", len(notes.read_text().strip()) > 100)
 else:
     print("    (NOTES.local.md は未配置。手元にだけ置く運用なので正常)")
+
+if SECRETS:
+    print(f"    (環境ごとの禁止語 {len(SECRETS)}件を {SECRETS_FILE.name} から読んだ)")
+else:
+    print(f"    ({SECRETS_FILE.name} が無いので一般形の検査のみ。"
+          f"手元では dev/secrets.local.example.txt を写して置く)")
 
 gi2 = (HERE / ".." / ".gitignore").read_text()
 check(".gitignore が NOTES.local.md を除外", "NOTES.local.md" in gi2)

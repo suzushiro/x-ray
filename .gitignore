@@ -18,6 +18,16 @@ NOTES.local.md
 *.local.md
 NOTES.md
 
+# 「公開ファイルに混ざってはいけない語」の一覧（実ホスト名・実IP・実垢名）。
+# 検査スクリプトがこれを読む。リスト自体が秘密なので上げない。
+# 雛形は dev/secrets.local.example.txt（こちらは公開してよい）
+dev/secrets.local.txt
+*.local.txt
+!*.local.example.txt
+
+# 監視対象の初期データを手元で持たせたいとき用。実アカウント名が入る
+data/accounts_fallback.json
+
 # ブラウザプロファイル（ログインセッションの実体）
 tools/profiles/
 

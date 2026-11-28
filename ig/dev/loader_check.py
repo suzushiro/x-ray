@@ -173,8 +173,8 @@ def test_skip_verify():
 def test_proxy():
     print("\n[7] IG_RAY_PROXY")
     tmp = tempfile.mkdtemp()
-    make_session_file(tmp, "nullzebra")
-    igs = with_env(IG_RAY_SESSIONS=tmp, IG_RAY_LOGIN_USER="nullzebra",
+    make_session_file(tmp, "testuser")
+    igs = with_env(IG_RAY_SESSIONS=tmp, IG_RAY_LOGIN_USER="testuser",
                    IG_RAY_PROXY="http://proxy.example:8080")
     called, restore = _trap_test_login()
     try:

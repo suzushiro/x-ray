@@ -422,27 +422,6 @@ def post_info(conn, tweet_id, indices=None):
             "owner": row["owner_username"] or ""}
 
 
-def legacy_preset(conn, owner):
-    """
-    ig-ray 側に覚えてあるキャプション／タグ（4.20 の tumblr_presets）。
-
-    X-Ray に同じ仕組みがあるので本来は X-Ray 側に持つが、
-    **ig-ray で既に編集したぶんを捨てない**ための読み取り専用の引き継ぎ。
-    X-Ray 側に無いときだけ使う。無ければ None。
-    """
-    if not owner:
-        return None
-    try:
-        r = conn.execute(
-            f"SELECT caption, tags FROM {SCHEMA}.tumblr_presets "
-            "WHERE owner_username=?", (owner,)).fetchone()
-    except Exception:
-        return None          # 古い ig-ray にはこのテーブルが無い
-    if not r:
-        return None
-    return {"caption": r["caption"] or "", "tags": r["tags"] or ""}
-
-
 def write_conn():
     """
     **書き込み用**の接続。ミュートの切り替えだけに使う。
@@ -593,6 +572,50 @@ def health(conn, interval_sec=21600.0, stale_intervals=3.0):
         print(f"[!] IGの状態を読めません: {type(e).__name__}: {e}")
         return None
     return out
+
+
+def backfill_jobs(conn):
+    """
+    過去投稿のさかのぼり取得（バックフィル）の進み具合。読めなければ []。
+
+    ig-ray のCLI（`backfill list`）しか見る手段がなく、「止まっているのに
+    気づかない」をやりやすい。X-Ray の画面に出すために読むだけの一覧。
+
+    列は ig-ray 側の版で増減するので、ある列だけを読む。無い列を
+    名指しすると一覧ごと空になる（ミュート一覧で一度踏んだ）。
+    """
+    cols = _columns(conn, "backfill_jobs")
+    if not cols or "username" not in cols:
+        return []
+
+    def col(name, default="NULL"):
+        return name if name in cols else f"{default} AS {name}"
+
+    sel = ", ".join([
+        "username",
+        col("status", "'?'"),
+        col("posts_seen", "0"),
+        col("posts_saved", "0"),
+        col("media_saved", "0"),
+        col("pages", "0"),
+        col("oldest_date", "''"),
+        col("message", "''"),
+        col("updated_at", "''"),
+        col("completed_at", "''"),
+    ])
+    order = "status, username" if "status" in cols else "username"
+    try:
+        cur = conn.execute(
+            f"SELECT {sel} FROM {SCHEMA}.backfill_jobs ORDER BY {order}")
+        rows = cur.fetchall()
+    except sqlite3.Error:
+        return []
+    # dict(row) に頼らない。呼び出し側が row_factory を立てていないと
+    # dict(tuple) が TypeError になり、それを握って**静かに空**を返す形に
+    # なっていた（一覧が出ないのに原因が分からない、の典型）。
+    # 列名は cursor.description から取れるので、接続の設定に依存させない。
+    names = [d[0] for d in cur.description]
+    return [dict(zip(names, r)) for r in rows]
 
 
 def stats(conn):

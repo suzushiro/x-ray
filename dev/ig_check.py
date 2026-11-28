@@ -615,6 +615,203 @@ for _p in ("app/", "ig/app/"):
 _gi = (_root / ".gitignore").read_text()
 check("ig-data/ を git に上げない", "ig-data/" in _gi)
 
+print("\n== [5e2] さかのぼり取得の進み具合を画面に出す ==")
+# ig-ray では `backfill list` を叩かないと見えず、止まっていても
+# 気づけなかった。/status に出す。
+_ig = sqlite3.connect(IG_DB)
+_ig.executescript("""
+CREATE TABLE IF NOT EXISTS backfill_jobs (
+    username TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'queued',
+    resume_json TEXT, login_user TEXT,
+    posts_seen INTEGER NOT NULL DEFAULT 0, posts_saved INTEGER NOT NULL DEFAULT 0,
+    media_saved INTEGER NOT NULL DEFAULT 0, pages INTEGER NOT NULL DEFAULT 0,
+    known_streak INTEGER NOT NULL DEFAULT 0, completed_runs INTEGER NOT NULL DEFAULT 0,
+    oldest_date TEXT, message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT, updated_at TEXT, completed_at TEXT);
+DELETE FROM backfill_jobs;
+INSERT INTO backfill_jobs
+ (username, status, posts_seen, posts_saved, media_saved, pages,
+  oldest_date, message, updated_at)
+VALUES ('ig_artist','running',120,80,200,6,'2024-05-01T00:00:00+00:00',
+        'ページ6まで','2026-11-25T10:00:00+00:00'),
+       ('ig_other','paused',10,3,9,1,NULL,'手で止めた','2026-11-20T10:00:00+00:00');
+""")
+_ig.commit(); _ig.close()
+
+
+def _status_html(env=None):
+    return subprocess.run([sys.executable, "-c", f'''
+import sys
+sys.path.insert(0, {str(APP)!r})
+import web
+print(web.app.test_client().get("/status").get_data(as_text=True))
+'''], capture_output=True, env=env or dict(os.environ), text=True,
+        timeout=120).stdout
+
+
+_sh = _status_html()
+check("さかのぼりの節が出る", "IG 過去投稿のさかのぼり" in _sh)
+check("走っているジョブが出る", "ig_artist" in _sh and "running" in _sh)
+check("止めたジョブも出る", "ig_other" in _sh and "paused" in _sh)
+check("件数が出る", ">120<" in _sh, [l.strip() for l in _sh.splitlines()
+                                 if ">120<" in l][:1])
+check("最古の日付は日付だけ", "2024-05-01<" in _sh)
+check("メッセージが読める", "ページ6まで" in _sh)
+check("操作方法を書いてある", "ig-backfill" in _sh)
+
+# 擬似アカウントはログでは読める名前にする（一覧からは除くが、ここでは見たい）
+_xc = sqlite3.connect(os.environ["DB_PATH"])
+_xc.execute("INSERT INTO scrape_log (run_at, screen_name, status, message,"
+            " new_tweets) VALUES (datetime('now'),'__run__','run_error','全滅',0)")
+_xc.commit(); _xc.close()
+_sh = _status_html()
+check("__run__ は読める名前で出る", "取得まるごと" in _sh)
+check("__run__ の生の名前は出さない", "@__run__" not in _sh)
+
+# IGが繋がっていなければ節ごと出さない（空の表を出すと壊れたように見える）
+_off = dict(os.environ)
+_off["IG_DB_PATH"] = os.path.join(BASE, "empty", "x.db")
+_off["IG_CACHE_DIR"] = os.path.join(BASE, "empty", "cache")
+check("IGが無いときは節を出さない",
+      "IG 過去投稿のさかのぼり" not in _status_html(_off))
+
+# 列が欠けていても一覧ごと空にしない。ig-ray 側の版差で
+# 列を名指しして空になる事故を一度やっている。
+_slim = os.path.join(BASE, "slim")
+os.makedirs(os.path.join(_slim, "cache"), exist_ok=True)
+_sdb = os.path.join(_slim, "ig_ray.db")
+_sc = sqlite3.connect(_sdb)
+_sc.executescript("""
+CREATE TABLE accounts (username TEXT PRIMARY KEY, is_target INTEGER DEFAULT 1);
+CREATE TABLE posts (shortcode TEXT PRIMARY KEY, owner_username TEXT,
+                    caption TEXT, date_utc TEXT, media_json TEXT);
+CREATE TABLE backfill_jobs (username TEXT PRIMARY KEY, status TEXT,
+                            posts_seen INTEGER);
+INSERT INTO backfill_jobs VALUES ('slim_user','running',7);
+""")
+_sc.commit(); _sc.close()
+_senv = dict(os.environ)
+_senv["IG_DB_PATH"] = _sdb
+_senv["IG_CACHE_DIR"] = os.path.join(_slim, "cache")
+_sh = _status_html(_senv)
+check("列が足りなくても一覧は出る", "slim_user" in _sh, _sh[:120])
+check("足りない列は空欄で埋める", "slim_user" in _sh and "—" in _sh)
+
+# 接続の row_factory に依存しないこと。
+# dict(row) を使っていたため、row_factory を立てていない接続では
+# TypeError を握って**静かに空**を返していた（手順書のワンライナーで踏んだ）。
+_rf = subprocess.run([sys.executable, "-c", f'''
+import sys, sqlite3
+sys.path.insert(0, {str(APP)!r})
+import ig_bridge
+c = sqlite3.connect({os.environ["DB_PATH"]!r})     # row_factory を立てない
+print("ATTACH", ig_bridge.attach(c))
+rows = ig_bridge.backfill_jobs(c)
+print("N", len(rows))
+print("KEYS", sorted(rows[0].keys()) if rows else [])
+'''], capture_output=True, env=dict(os.environ), text=True, timeout=120).stdout
+check("row_factory 無しでも一覧が返る", "N 2" in _rf, _rf.strip()[:200])
+check("列名でも引ける", "'username'" in _rf, _rf.strip()[:200])
+
+print("\n== [5f] ig-ray のTumblrプリセットを一度だけ引き継ぐ ==")
+# ig-ray はもうメンテしないので、毎回読んで穴埋めするのをやめ、
+# 起動時に一度だけ取り込む。毎回読む作りだと
+#   - X-Ray で消したプリセットが次回復活する
+#   - ig-ray のDBを外した日に覚えていた内容が消える
+# の両方を抱えるので、そのどちらも起きないことを確かめる。
+_ig = sqlite3.connect(IG_DB)
+_ig.executescript("""
+CREATE TABLE IF NOT EXISTS tumblr_presets (
+    owner_username TEXT PRIMARY KEY, caption TEXT, tags TEXT, updated_at TEXT);
+DELETE FROM tumblr_presets;
+INSERT INTO tumblr_presets (owner_username, caption, tags)
+VALUES ('ig_artist','IGで書いた本文','ig, art'),
+       ('ig_other','もうひとつ','b');
+""")
+_ig.commit(); _ig.close()
+
+
+def _run_import():
+    """別プロセスで import_ig_presets() を呼び、取り込み件数を返す。"""
+    out = subprocess.run([sys.executable, "-c", f'''
+import sys
+sys.path.insert(0, {str(APP)!r})
+import web
+print("IMPORTED", web.import_ig_presets())
+'''], capture_output=True, env=dict(os.environ), text=True, timeout=120).stdout
+    for line in out.splitlines():
+        if line.startswith("IMPORTED "):
+            return int(line.split()[1])
+    return -1
+
+
+def _xpresets():
+    c = sqlite3.connect(os.environ["DB_PATH"])
+    rows = dict(c.execute("SELECT screen_name, caption FROM tumblr_presets"))
+    c.close()
+    return rows
+
+
+_xc = sqlite3.connect(os.environ["DB_PATH"])
+_xc.execute("DELETE FROM tumblr_presets")
+_xc.execute("CREATE TABLE IF NOT EXISTS app_meta"
+            " (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+_xc.execute("DELETE FROM app_meta")
+_xc.commit(); _xc.close()
+
+check("取り込み前は空", _xpresets() == {}, _xpresets())
+_n = _run_import()
+check("2件取り込む", _n == 2, _n)
+_got = _xpresets()
+check("ig: 付きのキーで入る", "ig:ig_artist" in _got, sorted(_got))
+check("本文がそのまま入る", _got.get("ig:ig_artist") == "IGで書いた本文",
+      _got.get("ig:ig_artist"))
+
+# 二度目は何もしない（印が付いている）
+check("二度目は取り込まない", _run_import() == 0)
+
+# ここが本題。X-Ray で消したものが ig-ray 側に残っていても復活しない。
+_xc = sqlite3.connect(os.environ["DB_PATH"])
+_xc.execute("DELETE FROM tumblr_presets WHERE screen_name='ig:ig_artist'")
+_xc.commit(); _xc.close()
+_run_import()
+check("消したプリセットは復活しない", "ig:ig_artist" not in _xpresets(),
+      sorted(_xpresets()))
+check("消していないほうは残る", "ig:ig_other" in _xpresets(), sorted(_xpresets()))
+
+# APIも ig-ray を読まない。読んでいたら消したぶんが応答に混ざる。
+_api = subprocess.run([sys.executable, "-c", f'''
+import sys, json
+sys.path.insert(0, {str(APP)!r})
+import web
+r = web.app.test_client().get("/api/tumblr/presets")
+print("APIKEYS", json.dumps(sorted(r.get_json()["presets"].keys())))
+'''], capture_output=True, env=dict(os.environ), text=True, timeout=120).stdout
+check("APIは消したぶんを返さない", '"ig:ig_artist"' not in _api, _api.strip())
+check("APIは残っているぶんを返す", '"ig:ig_other"' in _api, _api.strip())
+
+# 取り込んだ内容は ig-ray 側を外しても消えない（X-Ray のDBに入っているので）
+# IG_CACHE_DIR も一緒に動かす。DBの場所だけ外すと、解決側が
+# キャッシュ先から実体を見つけてしまい「外した」状況にならない。
+_noig = dict(os.environ)
+_noig["IG_DB_PATH"] = os.path.join(BASE, "empty", "x.db")
+_noig["IG_CACHE_DIR"] = os.path.join(BASE, "empty", "cache")
+_api2 = subprocess.run([sys.executable, "-c", f'''
+import sys, json
+sys.path.insert(0, {str(APP)!r})
+import web
+r = web.app.test_client().get("/api/tumblr/presets")
+print("APIKEYS", json.dumps(sorted(r.get_json()["presets"].keys())))
+'''], capture_output=True, env=_noig, text=True, timeout=120).stdout
+check("ig-rayを外しても覚えた内容は残る", '"ig:ig_other"' in _api2, _api2.strip())
+
+# ig-ray 側のDBは読むだけ。印を書き込んでいないこと。
+_ig = sqlite3.connect(IG_DB)
+_meta = _ig.execute("SELECT name FROM sqlite_master WHERE name='app_meta'").fetchall()
+_ig.close()
+check("印は ig-ray 側に書かない", _meta == [], _meta)
+
 print("\n== [6] ig-ray側が変わっても壊れない ==")
 # 別リポジトリとして進化し続けるので、列が増えた/減ったで落ちないこと。
 c2 = sqlite3.connect(IG_DB)

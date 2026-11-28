@@ -453,6 +453,7 @@ async def scrape_all():
         return
 
     screen_names = get_all_screen_names()
+    ok_count = 0
     print(f"[*] {len(screen_names)}件の監視対象を取得開始")
     if PERSIST_CATEGORIES:
         print(f"[*] 永続カテゴリ: {', '.join(PERSIST_CATEGORIES)} → {IMAGES_DIR}")
@@ -484,6 +485,7 @@ async def scrape_all():
             conn.close()
 
             log_result(screen_name, "ok", new_tweets=new_count)
+            ok_count += 1
             print(f"[+] {screen_name}: {len(tweets)}件取得 (新規{new_count}件)")
 
         except Exception as e:
@@ -498,8 +500,10 @@ async def scrape_all():
 
         await asyncio.sleep(2)  # レート制限緩和のためアカウント間で少し待つ
 
+    # 巡回そのものの成否を残す。全滅ならバックオフに乗せる。
+    log_run_result(ok_count, len(screen_names))
     prune_scrape_log()
-    print("[*] 全件取得完了")
+    print(f"[*] 全件取得完了（{ok_count}/{len(screen_names)}件成功）")
 
 
 EXPECTED_EGRESS_IP = os.environ.get("EXPECTED_EGRESS_IP", "").strip()
@@ -643,6 +647,86 @@ def log_egress(res: dict):
         print(f"[!] 出口状態のログ記録に失敗: {e}")
 
 
+# 巡回が全滅したことを記録する擬似アカウント名
+RUN_LOG_NAME = "__run__"
+
+try:
+    BACKOFF_MAX_MIN = int(os.environ.get("SCRAPE_BACKOFF_MAX_MIN", "240") or 240)
+except ValueError:
+    BACKOFF_MAX_MIN = 240
+
+
+def consecutive_failures(conn, name, statuses):
+    """末尾から数えて status が statuses に含まれる行が何件続いているか。"""
+    n = 0
+    for r in conn.execute(
+            "SELECT status FROM scrape_log WHERE screen_name = ? "
+            "ORDER BY id DESC LIMIT 50", (name,)):
+        if r["status"] in statuses:
+            n += 1
+        else:
+            break
+    return n
+
+
+def backoff_active() -> bool:
+    """
+    直近の巡回が全滅し続けているなら、今回は見送る（True）。
+
+    連続失敗 n 回で 15 * 2^(n-1) 分あけ、SCRAPE_BACKOFF_MAX_MIN で頭打ち。
+    cron は15分おきに起動するので、ここで早く return することで間隔を伸ばす。
+    """
+    if BACKOFF_MAX_MIN <= 0:
+        return False
+    conn = get_conn()
+    try:
+        n = consecutive_failures(conn, RUN_LOG_NAME, ("run_error",))
+        if n == 0:
+            return False
+        wait_min = min(15 * (2 ** (n - 1)), BACKOFF_MAX_MIN)
+        row = conn.execute(
+            "SELECT run_at FROM scrape_log WHERE screen_name = ? "
+            "ORDER BY id DESC LIMIT 1", (RUN_LOG_NAME,)).fetchone()
+        if not row:
+            return False
+        last = datetime.fromisoformat(str(row["run_at"]).replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        waited = (datetime.now(timezone.utc) - last).total_seconds() / 60.0
+        if waited < wait_min:
+            print(f"[*] 直近{n}回が全滅しているため待機中"
+                  f"（{wait_min:.0f}分あけます / 経過{waited:.0f}分）")
+            return True
+        return False
+    except Exception as e:
+        # 判定できないなら止めない。取得を止める側に倒すと被害が大きい。
+        print(f"[!] バックオフ判定に失敗（続行します）: {type(e).__name__}: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def log_run_result(ok_count, total):
+    """
+    巡回そのものの成否を残す。1件も取れなければ全滅とみなす。
+
+    **アカウント単位のログだけでは「全部ダメ」を表現できない。**
+    87件のerror行が並ぶだけで、次回も同じ間隔で叩きに行ってしまう。
+    """
+    conn = get_conn()
+    try:
+        if total and ok_count == 0:
+            log_result(RUN_LOG_NAME, "run_error", f"{total}件すべて失敗")
+        else:
+            # 1件でも取れたらバックオフを解除する
+            if consecutive_failures(conn, RUN_LOG_NAME, ("run_error",)):
+                log_result(RUN_LOG_NAME, "run_ok", f"{ok_count}/{total}件成功")
+    except Exception as e:
+        print(f"[!] 巡回結果のログ記録に失敗: {type(e).__name__}: {e}")
+    finally:
+        conn.close()
+
+
 def clear_egress_log() -> int:
     """出口の警告ログを消す。.env を直したあとバナーを黙らせるため。"""
     conn = get_conn()
@@ -715,6 +799,12 @@ async def main():
     if len(sys.argv) > 1 and sys.argv[1] == "relogin":
         await api.pool.login_all()
         print("[+] 再ログイン完了")
+        return
+
+    # 全滅が続いているときは間隔を空ける。
+    # 2026-08 に X 側の変更で全87アカウントが落ち続けたとき、
+    # 15分おきに叩き続けていた。復旧しないうえに、叩くほど心証が悪い。
+    if backoff_active():
         return
 
     # 出口の確認。proxyを迂回している（＝分離が崩れている）ときだけ止める。

@@ -147,21 +147,11 @@ def init_db():
     """)
 
     # Tumblr共有用の一時トークン。
-    # /share/<token> として単一投稿のOGPページを外部公開するためのもの。
-    # token を知らないと辿れない（列挙不可）＋ expires_at で自動失効。
-    # X-Ray本体を晒さず、この1ページだけをリバースプロキシで外に出す運用。
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS share_tokens (
-        token       TEXT PRIMARY KEY,
-        tweet_id    TEXT NOT NULL,
-        payload     TEXT NOT NULL,   -- 確認画面で確定した内容のスナップショット(JSON)
-        created_at  TEXT NOT NULL,
-        expires_at  TEXT NOT NULL
-    )
-    """)
-    cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_share_tokens_exp ON share_tokens(expires_at)
-    """)
+    # 旧 share_tokens（シェアツール方式の一時公開トークン）は v54 で撤去。
+    # Tumblr投稿をAPI方式に固定した時点で不要になっていたのに、
+    # テーブルとルートだけが残って外部公開面を開いたままにしていた。
+    # 既存DBからも落とす（中身は一時トークンのみで、消して困るものは無い）。
+    cur.execute("DROP TABLE IF EXISTS share_tokens")
 
     # Tumblr投稿のキャプション／タグを、Xの投稿主ごとに覚えておく。
     # 同じ人の投稿を上げるたびに同じ編集をやり直さなくて済むようにするもの。
@@ -173,6 +163,18 @@ def init_db():
         caption     TEXT NOT NULL DEFAULT '',
         tags        TEXT NOT NULL DEFAULT '',
         updated_at  TEXT
+    )
+    """)
+
+    # 一度だけやる処理の済み印。
+    # 「ig-ray から引き継いだプリセットの取り込み」のように、毎回やると
+    # 消したものが復活してしまう類の処理に使う。DBと一緒に移動するので、
+    # ファイルで持つより取り違えが起きにくい。
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_meta (
+        key        TEXT PRIMARY KEY,
+        value      TEXT,
+        updated_at TEXT
     )
     """)
 

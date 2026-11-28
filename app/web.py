@@ -20,9 +20,6 @@ import cache_utils
 import tumblr_client
 import ig_bridge
 
-# Tumblr共有ページを外部公開する際のベースURL（例: https://share.example.com）。
-# 未設定なら共有機能は無効。X-Ray本体ではなく /share/<token> だけを
-# リバースプロキシ等で外に出し、この値をそのドメインにする。
 # カテゴリ名 → Tumblrタグ の変換表。
 # X-Ray内部のカテゴリ名をそのままタグにすると都合が悪いものを置き換える。
 # JSONで上書きできる: TUMBLR_TAG_MAP='{"ギャル":"girl","R18":"nsfw"}'
@@ -63,49 +60,22 @@ except ValueError:
 # 画面に出すバージョン。zipの採番と揃える（リリースのたびにここを上げる）。
 # APP_VERSION 環境変数で上書きできるので、手元で検証中の版に印を付けたいときは
 # compose の environment に書けばよい。
-APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "53"
+APP_VERSION = os.environ.get("APP_VERSION", "").strip() or "54"
 
-PUBLIC_SHARE_BASE_URL = os.environ.get("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
-# 共有トークンの有効時間（分）。Tumblrが読み終わればもう不要なので短くてよい。
-SHARE_TOKEN_TTL_MIN = int(os.environ.get("SHARE_TOKEN_TTL_MIN", "60") or 60)
-# 外部公開に使うホスト名（例: share.example.com）。
-# このホスト宛のリクエストは /share と /share-img 以外を 404 にする。
-# cloudflared 側の ingress 制限に加えた二層目の防御。
-PUBLIC_SHARE_HOST = os.environ.get("PUBLIC_SHARE_HOST", "").strip().lower()
-if not PUBLIC_SHARE_HOST and PUBLIC_SHARE_BASE_URL:
-    # ベースURLからホスト名を自動抽出
-    from urllib.parse import urlparse as _urlparse
-    PUBLIC_SHARE_HOST = (_urlparse(PUBLIC_SHARE_BASE_URL).hostname or "").lower()
+# 外部公開はしない。
+# Tumblr投稿をAPI方式に固定した時点（v35）で、一時公開URLを使う
+# シェアツール方式は不要になった。それでも /share 系のルートと
+# cloudflared のトンネルが残っていて、**もう存在しない機能のためだけに
+# 外部公開面が開いている**状態だった。v54 で撤去。
 from cache_utils import CACHE_DIR, IMAGES_DIR, PERSIST_CATEGORIES
 
 app = Flask(__name__)
 
 
-@app.before_request
-def _restrict_public_host():
-    """
-    公開ホスト名で来たリクエストは共有系ルートだけ許可する。
-    Tunnel経由でうっかり /manage 等が晒されるのを防ぐ最後の砦。
-    """
-    if not PUBLIC_SHARE_HOST:
-        return None
-    host = (request.host or "").split(":")[0].lower()
-    if host != PUBLIC_SHARE_HOST:
-        return None
-    # このホストで許可するのは共有ページと共有画像のみ
-    if request.path.startswith("/share/") or request.path.startswith("/share-img/"):
-        return None
-    from flask import abort
-    abort(404)
-
-
 @app.context_processor
-def _inject_share_flag():
-    # 全テンプレートで share_enabled を参照できるようにする
+def _inject_flags():
+    # 全テンプレートから参照できる値
     return {
-        # /share 系ルートの有無だけを表す。投稿UIはAPI方式に固定したので
-        # ボタンの表示条件には使わない。
-        "share_enabled": bool(PUBLIC_SHARE_BASE_URL),
         "tumblr_enabled": tumblr_client.is_configured(),
         "tumblr_draft_threshold": TUMBLR_DRAFT_THRESHOLD,
         "app_version": APP_VERSION,
@@ -147,6 +117,78 @@ def ig_on():
     return bool(g.get("ig_on"))
 
 
+def import_ig_presets():
+    """
+    ig-ray 側に覚えてあったキャプション／タグを、**一度だけ** X-Ray に取り込む。
+
+    以前は /api/tumblr/presets が毎回 ig-ray の DB を読んで穴埋めしていたが、
+    その作りには2つ問題がある:
+      - X-Ray 側で消したプリセットが、ig-ray 側に残っていると次回復活する
+      - ig-ray の DB を外した日に、覚えていた内容がまとめて消える
+    ig-ray はもうメンテしないので、取り込みは一度で終わらせ、
+    以後は X-Ray 側の tumblr_presets だけを見る。
+
+    取り込み済みの印は app_meta に残す。印があれば ig-ray の DB が
+    繋がっていても二度と読まない（消したものが戻らないように）。
+    """
+    conn = get_conn()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key        TEXT PRIMARY KEY,
+                value      TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.commit()
+        done = conn.execute(
+            "SELECT 1 FROM app_meta WHERE key='ig_presets_imported'").fetchone()
+        if done:
+            return 0
+
+        if not ig_bridge.attach(conn):
+            # IGが繋がっていない。印は付けない（繋いだ日に取り込めるように）。
+            return 0
+
+        rows = []
+        try:
+            rows = conn.execute(
+                f"SELECT owner_username, caption, tags "
+                f"FROM {ig_bridge.SCHEMA}.tumblr_presets").fetchall()
+        except Exception:
+            # 古い ig-ray にはこのテーブルが無い。取り込むものが無いのと同じ
+            # なので、印を付けて以後は見ない。
+            rows = []
+    finally:
+        conn.close()
+
+    # attach したコネクションは query_only なので書き込み用に開き直す。
+    conn = get_conn()
+    try:
+        n = 0
+        for r in rows:
+            key = ig_bridge.ID_PREFIX + r["owner_username"]
+            cur = conn.execute("""
+                INSERT INTO tumblr_presets (screen_name, caption, tags, updated_at)
+                VALUES (?,?,?,?)
+                ON CONFLICT(screen_name) DO NOTHING
+            """, (key, r["caption"] or "", r["tags"] or "",
+                  datetime.now(timezone.utc).isoformat()))
+            n += cur.rowcount or 0
+        conn.execute("""
+            INSERT INTO app_meta (key, value, updated_at) VALUES (?,?,?)
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value, updated_at=excluded.updated_at
+        """, ("ig_presets_imported", str(n),
+              datetime.now(timezone.utc).isoformat()))
+        conn.commit()
+        if n:
+            print(f"[*] ig-ray のTumblrプリセットを {n} 件取り込みました")
+        return n
+    finally:
+        conn.close()
+
+
 @app.teardown_appcontext
 def close_db(exc):
     for key in ("conn", "conn_ro"):
@@ -178,6 +220,13 @@ PER_PAGE = 100  # ページネーション件数
 # scraper.py が出口（回線分離）の状態を scrape_log に残すときの擬似アカウント名。
 # アカウント一覧には出さず、専用のバナーで扱う。
 EGRESS_LOG_NAME = "__egress__"
+RUN_LOG_NAME = "__run__"
+
+# 擬似アカウントを個別に列挙すると、増えたときに漏れて
+# 「__run__ が2回エラー」のような表示が出る。前後が __ の名前をまとめて除く。
+# LIKE ではなく GLOB。LIKE だと _ がワイルドカード扱いで ESCAPE 指定が必要になり、
+# そのエスケープ記述を一度書き損じてトップページを 500 にした。GLOB は _ がそのまま。
+NOT_PSEUDO_SQL = "screen_name NOT GLOB '__*__'"
 
 
 def get_categories():
@@ -528,8 +577,7 @@ def check_stale(conn):
 
     row = conn.execute(
         "SELECT MAX(run_at) AS t FROM scrape_log "
-        "WHERE status = 'ok' AND COALESCE(screen_name,'') != ?",
-        (EGRESS_LOG_NAME,)).fetchone()
+        f"WHERE status = 'ok' AND {NOT_PSEUDO_SQL}").fetchone()
     last, basis = (row["t"] if row else None), "log"
 
     if not last:
@@ -613,18 +661,18 @@ def index():
     """).fetchone()
 
     # エラーが続いてるアカウントを抽出（直近3回全部errorのもの）
-    # __egress__ は擬似アカウント名なのでアカウント一覧からは除く。
-    error_accounts = conn.execute("""
+    # 擬似アカウント（__egress__ / __run__）はアカウント一覧からは除く。
+    error_accounts = conn.execute(f"""
         SELECT screen_name, COUNT(*) as err_count
         FROM scrape_log
         WHERE status = 'error'
-          AND screen_name != ?
+          AND {NOT_PSEUDO_SQL}
           AND run_at > datetime('now', '-3 hours')
         GROUP BY screen_name
         HAVING err_count >= 2
         ORDER BY err_count DESC
         LIMIT 5
-    """, (EGRESS_LOG_NAME,)).fetchall()
+    """).fetchall()
 
     # 出口（回線分離）の異常。ログファイルにしか出ないと気づけないので画面に出す。
     egress_alert = conn.execute("""
@@ -1005,19 +1053,9 @@ def _bookmark_ig(conn, tweet_id):
     return jsonify({"ok": True, "bookmarked": True, "promoted": copied})
 
 
-def _purge_expired_shares(conn):
-    """期限切れの共有トークンを掃除する。"""
-    now = datetime.now(timezone.utc).isoformat()
-    try:
-        conn.execute("DELETE FROM share_tokens WHERE expires_at < ?", (now,))
-        conn.commit()
-    except Exception:
-        pass
-
-
-def _share_images_for(tweet_id, conn):
+def _local_image_names(tweet_id, conn):
     """
-    共有対象のローカル保存済み画像のファイル名リストを返す。
+    投稿に紐づくローカル保存済み画像のファイル名リストを返す。
     削除済み画像・ローカル未保存(リモートのみ)は除外する。
     （外部公開ページなので、手元にある実ファイルだけを対象にする）
     """
@@ -1048,118 +1086,6 @@ def _share_images_for(tweet_id, conn):
     return names
 
 
-@app.route("/api/share/prepare", methods=["POST"])
-def api_share_prepare():
-    """
-    確認画面で確定した内容を受け取り、共有トークンを発行する。
-    返す share_url を canonicalUrl にして Tumblr のシェアツールを開く。
-    """
-    if not PUBLIC_SHARE_BASE_URL:
-        return jsonify({"ok": False,
-                        "error": "共有機能が未設定です（PUBLIC_SHARE_BASE_URL）"}), 400
-
-    tweet_id = (request.form.get("tweet_id") or "").strip()
-    if not tweet_id:
-        return jsonify({"ok": False, "error": "tweet_idが必要です"}), 400
-
-    conn = db()
-    _purge_expired_shares(conn)
-
-    images = _share_images_for(tweet_id, conn)
-    if not images:
-        return jsonify({"ok": False,
-                        "error": "共有できるローカル保存画像がありません"}), 400
-
-    caption = (request.form.get("caption") or "").strip()
-    tags_raw = (request.form.get("tags") or "").strip()
-    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-
-    row = conn.execute("SELECT url FROM tweets WHERE tweet_id=?", (tweet_id,)).fetchone()
-    source_url = row["url"] if row else ""
-
-    payload = {
-        "tweet_id": tweet_id,
-        "images": images,
-        "caption": caption,
-        "tags": tags,
-        "source_url": source_url,
-    }
-
-    token = secrets.token_urlsafe(16)
-    now = datetime.now(timezone.utc)
-    expires = now + timedelta(minutes=SHARE_TOKEN_TTL_MIN)
-    conn.execute(
-        "INSERT INTO share_tokens (token, tweet_id, payload, created_at, expires_at)"
-        " VALUES (?,?,?,?,?)",
-        (token, tweet_id, json.dumps(payload, ensure_ascii=False),
-         now.isoformat(), expires.isoformat()))
-    conn.commit()
-
-    share_url = f"{PUBLIC_SHARE_BASE_URL}/share/{token}"
-    # 画像URLを直接返す。Tumblrのシェアツールに content として渡すことで、
-    # canonicalUrl を X の元投稿に向けたまま画像を載せられる。
-    image_urls = [f"{PUBLIC_SHARE_BASE_URL}/share-img/{token}/{i}"
-                  for i in range(len(images))]
-    return jsonify({"ok": True, "share_url": share_url,
-                    "image_urls": image_urls,
-                    "source_url": source_url,
-                    "expires_in_min": SHARE_TOKEN_TTL_MIN})
-
-
-def _load_share(token, conn):
-    row = conn.execute(
-        "SELECT payload, expires_at FROM share_tokens WHERE token=?", (token,)).fetchone()
-    if not row:
-        return None
-    if row["expires_at"] < datetime.now(timezone.utc).isoformat():
-        return None
-    try:
-        return json.loads(row["payload"])
-    except Exception:
-        return None
-
-
-@app.route("/share/<token>")
-def share_page(token):
-    """
-    Tumblr等が読むためのOGPページ。外部公開されるのはこのルートのみ。
-    DBの中身は出さず、確定済みスナップショットの画像とキャプションだけ返す。
-    """
-    conn = db()
-    data = _load_share(token, conn)
-    if not data:
-        return "リンクの有効期限が切れています。", 404
-
-    base = PUBLIC_SHARE_BASE_URL or request.host_url.rstrip("/")
-    img_urls = [f"{base}/share-img/{token}/{i}" for i in range(len(data["images"]))]
-    og_image = img_urls[0] if img_urls else ""
-    caption = data.get("caption") or ""
-    tags = data.get("tags") or []
-    title = caption or "X-Ray"
-
-    return render_template("share.html",
-                           og_image=og_image, img_urls=img_urls,
-                           caption=caption, title=title, tags=tags,
-                           source_url=data.get("source_url", ""),
-                           canonical=f"{base}/share/{token}")
-
-
-@app.route("/share-img/<token>/<int:idx>")
-def share_image(token, idx):
-    """共有トークン経由の画像配信。token が無効なら出さない。"""
-    conn = db()
-    data = _load_share(token, conn)
-    if not data:
-        return "not found", 404
-    images = data.get("images", [])
-    if idx < 0 or idx >= len(images):
-        return "not found", 404
-    filename = images[idx]
-    if os.path.exists(os.path.join(IMAGES_DIR, filename)):
-        return send_from_directory(IMAGES_DIR, filename)
-    return send_from_directory(CACHE_DIR, filename)
-
-
 def _local_image_paths(tweet_id, conn, indices=None):
     """
     投稿に紐づくローカル画像の実ファイルパスを返す。
@@ -1169,7 +1095,7 @@ def _local_image_paths(tweet_id, conn, indices=None):
     **渡された順序どおり**に返す。UI側が選んだ順に番号を振って見せているため、
     その順序をそのままTumblrへの添付順にする。
     """
-    names = _share_images_for(tweet_id, conn)
+    names = _local_image_names(tweet_id, conn)
     if indices is not None:
         picked = []
         for i in indices:
@@ -1252,23 +1178,8 @@ def api_tumblr_presets():
         "SELECT screen_name, caption, tags FROM tumblr_presets").fetchall()
     presets = {r["screen_name"]: {"caption": r["caption"], "tags": r["tags"]}
                for r in rows}
-
-    # ig-ray 側で既に編集したぶんを引き継ぐ。X-Ray に無いものだけ。
-    # 一度 X-Ray から投稿すれば X-Ray 側に保存され、以後はそちらが使われる。
-    ro = db_ro()
-    if ig_on():
-        try:
-            for r in ro.execute(
-                f"SELECT owner_username, caption, tags "
-                f"FROM {ig_bridge.SCHEMA}.tumblr_presets"
-            ):
-                key = ig_bridge.ID_PREFIX + r["owner_username"]
-                if key not in presets:
-                    presets[key] = {"caption": r["caption"] or "",
-                                    "tags": r["tags"] or ""}
-        except Exception:
-            pass          # 古い ig-ray にはこのテーブルが無い
-
+    # ig-ray 側のプリセットは起動時に import_ig_presets() で取り込み済み。
+    # ここで ig-ray を読まないのは、X-Ray で消したものが復活しないようにするため。
     return jsonify({"ok": True, "presets": presets})
 
 
@@ -1940,10 +1851,24 @@ def status():
         SELECT screen_name, display_name, last_scraped_at FROM accounts
         ORDER BY last_scraped_at DESC
     """).fetchall()
-    return render_template("status.html", logs=logs, accounts=accounts)
+
+    # IGの過去投稿さかのぼり（バックフィル）の進み具合。
+    # ig-ray の CLI でしか見えなかったので、止まっても気づけなかった。
+    ro = db_ro()
+    ig_backfill = ig_bridge.backfill_jobs(ro) if ig_on() else []
+
+    return render_template("status.html", logs=logs, accounts=accounts,
+                           ig_backfill=ig_backfill)
 
 
 if __name__ == "__main__":
+    # ig-ray から引き継ぐプリセットの取り込み。失敗しても画面は出したいので
+    # ここで握る（取り込めなければ印が付かず、次の起動でまた試す）。
+    try:
+        import_ig_presets()
+    except Exception as e:
+        print(f"[!] Tumblrプリセットの取り込みに失敗: {type(e).__name__}: {e}")
+
     # Flaskの開発サーバーは本番非推奨。waitressがあればそちらを使う。
     try:
         from waitress import serve

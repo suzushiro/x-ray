@@ -399,6 +399,7 @@ IG-Ray の取得系を `ig/` に取り込んである。**リポジトリと com
 依存の系統が違う。同居させると片方の更新でもう片方が壊れる）。
 
 詳細は `ig/README.md`。設定は `.env` の `IG_RAY_*`。
+IG-Ray 側を畳む手順は `RETIRE_IG_RAY.md`。
 
 ```bash
 # profile 付きのサービスは素の build ではビルドされない
@@ -693,73 +694,63 @@ TUMBLR_TAG_MAP={"ギャル":"girl","R18":"nsfw","news":""}
 ### 注意
 
 - レート制限は1日250投稿・250画像アップロード。手動投稿では当たらない
-- `TUMBLR_CONSUMER_KEY` が未設定なら投稿機能は無効になり、
-  下記の共有リンク方式（トンネル経由）にフォールバックする
+- `TUMBLR_CONSUMER_KEY` が未設定なら投稿ボタンは出ない。
+  旧方式（共有リンク／トンネル）へのフォールバックは v54 で無くなった
 
-## Tumblr共有（トンネル方式 / 旧方式）
+## Tumblr共有（トンネル方式）— v54 で撤去
 
-**投稿UIはAPI方式に固定したので、通常この方式は使わない。**
-`/share` 系のエンドポイントは単一投稿のOGPプレビュー用途として残してあるが、
-投稿ボタンからは呼ばれない（`TUMBLR_CONSUMER_KEY` 未設定だとボタン自体が出ない）。
+かつて `/share` `/share-img` `/api/share/prepare` を外部公開し、Tumblr の
+シェアツールに画像URLを拾わせる方式があった。API方式に一本化した時点で
+投稿ボタンからは呼ばれなくなっていたが、**ルートとテーブルだけが残り、
+X-Ray で唯一の外部公開面を開いたままにしていた。** v54 で以下を撤去した。
 
-Tumblrのシェアツールは複数枚の自動添付をやめており、API方式なら
-外部公開なしで複数枚を送れるため、こちらに一本化した。
-cloudflared / トンネルはTumblr投稿のためには不要になっている。
+- ルート `/share/<token>` `/share-img/<token>/<n>` `/api/share/prepare`
+- テーブル `share_tokens`（既存DBからも `DROP` する。中身は一時トークンのみ）
+- 環境変数 `PUBLIC_SHARE_BASE_URL` `PUBLIC_SHARE_HOST` `SHARE_TOKEN_TTL_MIN`
+- `app/templates/share.html` / `dev/share_check.py` / `deploy/`
 
+撤去後は X-Ray に外部公開が必要なルートが**ひとつも無い**。
+cloudflared やリバースプロキシは Tumblr 投稿のためには要らない。
+`dev/route_check.py` が「`/share*` が404であること」「`share_tokens` が
+無いこと」を検査しているので、うっかり復活すると落ちる。
 
+## 全滅が続いたときの待機（v54）
 
-投稿カードの Tumblr ボタンから、ローカル保存済みの画像を Tumblr に投稿できる。
-確認画面でキャプション・タグを編集してから、Tumblr の投稿画面を開く二段構え。
+15分ごとに回しているので、Xの仕様変更やクッキー失効で全滅し始めると、
+失敗したまま延々と叩き続ける。叩き続けるほど弾かれやすくもなるので、
+**1回の実行で1件も取れなかったら次回以降の間隔を空ける。**
 
-### 仕組み
+- 連続 n 回の全滅で `15 * 2^(n-1)` 分あける（15 / 30 / 60 / 120 …）
+- `SCRAPE_BACKOFF_MAX_MIN`（既定 240）で頭打ち
+- **1件でも取れたら即解除**。部分的な失敗では待たない
+- 記録は `scrape_log` の擬似アカウント `__run__`（`run_ok` / `run_error`）
 
-Tumblr のシェアツールには、写真URLを直接渡す `content` パラメータと、
-出典（リンク先）になる `canonicalUrl` がある。X-Ray はこう組み合わせている。
+擬似アカウント（`__run__` / `__egress__`）は「エラーが続いているアカウント」の
+一覧には出さない。一覧に出す条件は `NOT_PSEUDO_SQL` 一箇所にまとめてある。
+`LIKE` だと `_` がワイルドカードで `ESCAPE` 指定が必要になるので `GLOB` を使う
+（そのエスケープを書き損じてトップページを500にしたことがある）。
 
-- `content` … `/share-img/<token>/<n>` の画像URL
-- `canonicalUrl` … **Xの元投稿URL**。Tumblr上の出典表示がこれになる
-- `caption` … 元投稿へのリンク付きテキスト
+## IG の進み具合を `/status` に出す（v54）
 
-画像URLは Tumblr のサーバーから取得されるため、`/share-img` だけは
-外部から到達できる必要がある。`/share/<token>` は OGP 付きの
-プレビューページとしても機能する（共有リンクを直接開いた場合用）。
+過去投稿のさかのぼり（バックフィル）は ig-ray の `backfill list` を
+叩かないと見えず、止まっていても気づけなかった。`/status` に一覧を出す。
 
-- `token` は投稿ごとにランダム生成（列挙不可）。`SHARE_TOKEN_TTL_MIN` 後に自動失効
-- このページは確定済みの画像とキャプションだけを返し、DBの中身は晒さない
-- 外部公開が必要なのは `/share` と `/share-img` の2ルートだけ
+ig-ray 側の版によって列が増減するので、**ある列だけを読む。**
+無い列を名指しすると一覧ごと空になる（ミュート一覧で一度踏んだ）。
 
-### セットアップ
+## Tumblrプリセットの引き継ぎ（v54）
 
-`.env` に外部公開時のベースURLを設定する。
+ig-ray 側に覚えてあったキャプション／タグは、**web 起動時に一度だけ**
+X-Ray の `tumblr_presets` に取り込む。済み印は `app_meta` に残す。
 
-```
-PUBLIC_SHARE_BASE_URL=https://share.example.com
-SHARE_TOKEN_TTL_MIN=60
-```
+以前は `/api/tumblr/presets` が毎回 ig-ray のDBを読んで穴埋めしていた。
+その作りには2つ問題がある。
 
-`PUBLIC_SHARE_HOST` も設定すると、そのホスト名宛のリクエストを web 側でも
-`/share` 系だけに制限する（リバースプロキシの制限に加えた二層目の防御）。
-通常は `PUBLIC_SHARE_BASE_URL` から自動抽出されるので省略可。
+- X-Ray 側で消したプリセットが、ig-ray 側に残っていると次回復活する
+- ig-ray のDBを外した日に、覚えていた内容がまとめて消える
 
-そして `/share` と `/share-img` だけをリバースプロキシで外に出す。
-X-Ray本体（`/manage` やDB）は公開しないこと。Cloudflare Tunnel を使う場合の
-設定例と手順は `deploy/` にある。ドメインを持っていない場合、動作確認だけなら
-`cloudflared tunnel --url http://localhost:8501` のクイックトンネルで試せる
-（URLは起動ごとに変わるので常用には向かない）。
-
-`PUBLIC_SHARE_BASE_URL` を空にすると共有ボタンは表示されず、機能は無効になる。
-
-### 注意点
-
-- 共有できるのは**ローカル保存済みの画像**のみ（リモートのみ・削除済みは対象外）
-- 画像URL（`/share-img`）に外部到達性が無いと、画像が読み込まれず投稿できない
-- **複数枚の投稿は1枚だけ選んで添付する。** 仕様上 `content` にカンマ区切りで
-  複数URLを渡せることになっているが、現在の Tumblr は複数枚だとフェッチ自体をせず
-  空の投稿画面になる（1枚なら自動添付される）。Tumblr が廃止した画像選択ステップを
-  確認モーダルが代わりに引き受けている。確認画面のサムネをクリックして選ぶ。
-  「全枚数を渡す（実験）」のトグルで本来の渡し方も試せるので、
-  Tumblr 側が直ったらそちらを既定に戻せばよい
-- 公開するのは投稿ページのみ。スクレイパーや管理画面は絶対に外に出さないこと
+ig-ray はもうメンテしないので、取り込みは一度で終わらせ、
+以後は X-Ray 側だけを見る。
 
 ## 設定と秘密情報
 
@@ -773,10 +764,55 @@ vi .env
 リポジトリに含めないもの（`.gitignore` 済み）:
 
 - `data/` — **クッキー（生きたセッショントークン）**・DB・保存画像
+- `ig-data/` — IGのアーカイブ（DB・画像・ログインセッション）
 - `.env` — IPアドレスなど環境固有の値
 - `tools/profiles/` — ブラウザのログインセッション
+- `dev/secrets.local.txt` — 公開ファイルに混ざってはいけない語の一覧
+- `data/accounts_fallback.json` — 監視対象の初期データ（任意）
 
 `docker-compose.yml` には実IPを書かず、`${PROXY_URL}` のように `.env` を参照させること。
 
 環境固有の手順や構成のメモは `NOTES.local.md`（`.gitignore` 済み）に置いている。
 公開リポジトリに含めたくない実IP・ホスト名・監視対象などはそちらに書く。
+
+### 公開ファイルの走査（v54 で作り直した）
+
+`dev/egress_check.py` が、ツリーのテキストファイル全部を走査して
+実ホスト名・実IP・実アカウント名が混ざっていないかを見る。
+
+```bash
+cp dev/secrets.local.example.txt dev/secrets.local.txt
+vi dev/secrets.local.txt        # 実際の値を1行1語で書く
+cd dev && python egress_check.py
+```
+
+`secrets.local.txt` が無くても、RFC予約外の IPv4 らしき文字列は
+一般形で検知する（オクテットが0-255かを見るので、SVGのパスデータや
+`Chrome/124.0.0.0` のようなバージョン表記は拾わない）。
+
+**v54 でこの仕組みを作り直した理由。** それまでは
+
+1. 禁止語リストを `dev/egress_check.py` に**直接書いていた**。
+   公開ファイルを検査するスクリプト自身が、実ISP名・実ホスト名・実IP・
+   実アカウント名を全部並べて公開していた（検査する側が漏らしていた）。
+2. 走査対象を**ファイル名の手書きリスト**で持っていた。そのリストに
+   載っていない `app/seed_accounts.py` に監視対象62件がベタ書きされたまま、
+   `app/templates/manage.html` と `ig/dev/` に実アカウント名が残ったまま
+   通っていた。
+
+名簿を手で保つ方式だと、新しいファイルは必ず検査の外から生まれる。
+いまは「ツリー全部を見て、秘密の語は別ファイルから読む」形にしてある。
+
+### 監視対象の置き場所
+
+真のマスタは `data/accounts.json`（`.gitignore` 済み）。追加・編集は
+`/manage` 画面から行う。`app/seed_accounts.py` の `ACCOUNTS_FALLBACK` は
+**空**にしてある（以前は実アカウント62件がここに残っていた）。
+
+`accounts.json` が無い状態で初期データを入れたいときだけ、
+`data/accounts_fallback.json` を同じ形式で置く。
+
+```json
+{"accounts": [{"screen_name": "jack", "display_name": "Jack",
+               "categories": ["news"]}]}
+```

@@ -17,9 +17,11 @@
     table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 30px; }
     th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a3038; }
     th { color: #8b98a5; font-weight: normal; }
-    .ok { color: #00ba7c; }
-    .error { color: #f4212e; }
-    .warn { color: #ffd400; }
+    .ok, .run_ok, .login_ok, .ok_degraded, .backfill_done { color: #00ba7c; }
+    .error, .run_error, .login_error, .egress_error { color: #f4212e; }
+    .warn, .egress_warn { color: #ffd400; }
+    .muted { color: #8b98a5; }
+    .note { color: #8b98a5; font-size: 12px; margin: -22px 0 24px; }
 </style>
 </head>
 <body>
@@ -44,13 +46,42 @@
     {% for l in logs %}
     <tr>
         <td>{{ l.run_at[:19].replace('T', ' ') }}</td>
-        <td>{% if l.screen_name == '__egress__' %}🌐 出口IP{% else %}@{{ l.screen_name }}{% endif %}</td>
+        {# 擬似アカウントは一覧では隠すが、このログでは中身を見たいので
+           読める名前に置き換えて出す。 #}
+        <td>{% if l.screen_name == '__egress__' %}🌐 出口IP
+            {%- elif l.screen_name == '__run__' %}🔁 取得まるごと
+            {%- else %}@{{ l.screen_name }}{% endif %}</td>
         <td class="{{ l.status }}">{{ l.status }}</td>
         <td>{{ l.new_tweets }}</td>
         <td>{{ l.message }}</td>
     </tr>
     {% endfor %}
 </table>
+
+{# 過去投稿のさかのぼり取得。ig-ray では `backfill list` を叩かないと
+   見えず、止まっていても気づけなかった。IGが繋がっていない時は節ごと出さない。 #}
+{% if ig_backfill %}
+<h2>IG 過去投稿のさかのぼり</h2>
+<table>
+    <tr><th>状態</th><th>アカウント</th><th>確認</th><th>新規</th>
+        <th>メディア</th><th>頁</th><th>最古</th><th>最終更新</th><th>メッセージ</th></tr>
+    {% for j in ig_backfill %}
+    <tr>
+        <td class="{{ j.status }}">{{ j.status }}</td>
+        <td>@{{ j.username }}</td>
+        <td>{{ j.posts_seen }}</td>
+        <td>{{ j.posts_saved }}</td>
+        <td>{{ j.media_saved }}</td>
+        <td>{{ j.pages }}</td>
+        <td>{{ (j.oldest_date or '')[:10] or '—' }}</td>
+        <td>{{ (j.updated_at or '')[:16].replace('T', ' ') or '—' }}</td>
+        <td class="muted">{{ j.message or '' }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<p class="note">さかのぼりの操作は
+<code>docker compose run --rm ig-backfill …</code>（add / pause / resume / reset）。</p>
+{% endif %}
 
 </body>
 </html>

@@ -196,8 +196,10 @@ finally:
     scraper.API = _real_api
 
 conn = db.get_conn()
+# 擬似アカウント（巡回そのものの結果）は監視対象ではないので除く
 _rows = dict((r[0], r[1]) for r in conn.execute(
-    "SELECT screen_name, message FROM scrape_log").fetchall())
+    "SELECT screen_name, message FROM scrape_log WHERE screen_name NOT LIKE '\\_\\_%' ESCAPE '\\'"
+).fetchall())
 conn.close()
 
 check("例外が出ても3件すべて処理される", len(_rows) == 3, str(_rows))
@@ -207,6 +209,70 @@ check("プール枯渇も型名で分かる",
       _rows.get("ng_nopool", "").startswith("NoAccountError"), str(_rows.get("ng_nopool")))
 check("Noneはデータ無しとして扱う",
       _rows.get("ng_none") == "user not found", str(_rows.get("ng_none")))
+
+print("\n== 全滅が続いたら間隔を空ける ==")
+# 2026-08 に X 側の変更で全87アカウントが落ち続けたとき、15分おきに
+# 叩き続けていた。復旧しないうえに叩くほど心証が悪い。
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+conn = db.get_conn()
+conn.execute("DELETE FROM scrape_log")
+conn.commit(); conn.close()
+
+check("失敗が無ければ待たない", scraper.backoff_active() is False)
+
+
+def _put_run(status, minutes_ago, n=1):
+    cn = db.get_conn()
+    for _ in range(n):
+        cn.execute("INSERT INTO scrape_log (run_at, screen_name, status, message,"
+                   " new_tweets) VALUES (?,?,?,?,0)",
+                   ((_dt.now(_tz.utc) - _td(minutes=minutes_ago)).isoformat(),
+                    scraper.RUN_LOG_NAME, status, ""))
+    cn.commit(); cn.close()
+
+
+# 1回目の全滅 → 15分あける
+_put_run("run_error", 5)
+check("1回目は15分待つ", scraper.backoff_active() is True)
+conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+_put_run("run_error", 20)
+check("15分経っていれば走る", scraper.backoff_active() is False)
+
+# 3回続いたら 15*4=60分
+conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+_put_run("run_error", 30, n=3)
+check("3回続いたら60分待つ", scraper.backoff_active() is True)
+
+# 上限で頭打ち
+conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+_put_run("run_error", 10000, n=20)
+check("上限を超えたら走る（頭打ち）", scraper.backoff_active() is False)
+
+# 1件でも取れたら解除される
+conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+_put_run("run_error", 5, n=3)
+scraper.log_run_result(1, 10)
+check("1件でも取れたら解除", scraper.backoff_active() is False)
+
+# 全滅したら記録される
+conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+scraper.log_run_result(0, 10)
+conn = db.get_conn()
+_r = conn.execute("SELECT status, message FROM scrape_log WHERE screen_name=?",
+                  (scraper.RUN_LOG_NAME,)).fetchone()
+conn.close()
+check("全滅を記録する", _r and _r[0] == "run_error", str(_r))
+check("件数が分かる", _r and "10件すべて失敗" in (_r[1] or ""), str(_r))
+
+# 取得が1件も無い環境（監視対象ゼロ）では全滅扱いにしない
+conn = db.get_conn(); conn.execute("DELETE FROM scrape_log"); conn.commit(); conn.close()
+scraper.log_run_result(0, 0)
+conn = db.get_conn()
+_n = conn.execute("SELECT COUNT(*) FROM scrape_log WHERE screen_name=?",
+                  (scraper.RUN_LOG_NAME,)).fetchone()[0]
+conn.close()
+check("監視対象ゼロなら記録しない", _n == 0, str(_n))
 
 print("\n" + ("=== 全て通過 ===" if not fails else f"=== 失敗 {len(fails)}件: {fails} ==="))
 sys.exit(1 if fails else 0)

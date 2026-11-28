@@ -102,6 +102,28 @@ if not _ok:
     fails.append(("/", "missing version in h1"))
 
 
+# 外部公開面が無いこと。
+# Tumblr投稿をAPI方式に固定した時点でシェアツール方式は不要になったのに、
+# **もう存在しない機能のためだけに /share 系が外部公開されていた**（v54で撤去）。
+for _p in ("/share/dummy", "/share-img/dummy/0", "/api/share/prepare"):
+    _r = client.get(_p) if not _p.startswith("/api") else client.post(_p)
+    _ok = _r.status_code == 404
+    print(f"{'OK ' if _ok else 'NG '} {_p} は存在しない: {_r.status_code}")
+    if not _ok:
+        fails.append((_p, "share route still exists"))
+import sqlite3 as _sq3
+import db as _db
+# アプリと同じ経路でDBの場所を取る。環境変数を直接読むと、
+# テストを素で起動したときに別のDBを見て誤判定する。
+_c = _sq3.connect(_db.DB_PATH)
+_t = [r[0] for r in _c.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='share_tokens'")]
+_c.close()
+print(f"{'OK ' if not _t else 'NG '} share_tokens テーブルが無い")
+if _t:
+    fails.append(("share_tokens", "table still exists"))
+
+
 print("\n== テンプレートの閉じタグ漏れ ==")
 # <style>/<script> の閉じタグ外にコードが漏れていないか（cat >> 追記ミスの検出）
 for path in ("/"):
